@@ -1,7 +1,7 @@
 {
   "name": "intelligence-agent",
-  "version": "0.1.0",
-  "description": "Vanquish Intelligence Agent — онлайн-разведчик для Marketing Agency",
+  "version": "0.2.0",
+  "description": "Vanquish Intelligence Agent — онлайн-разведчик с OSINT, deepresearch-режимом и учётом затрат",
   "type": "module",
   "main": "src/telegram-bot/index.js",
   "scripts": {
