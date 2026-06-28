@@ -1,0 +1,19 @@
+{
+  "agent": {
+    "name": "Vanquish Intelligence Agent",
+    "version": "0.1.0",
+    "language": "ru"
+  },
+  "telegram": {
+    "allowed_user_ids": [1064521326]
+  },
+  "perplexity": {
+    "model": "sonar",
+    "max_tokens_search": 512,
+    "max_tokens_trends": 700
+  },
+  "limits": {
+    "whisper_max_file_mb": 25,
+    "scrape_max_chars": 1500
+  }
+}

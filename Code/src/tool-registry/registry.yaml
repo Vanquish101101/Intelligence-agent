@@ -1,0 +1,34 @@
+# Tool Registry — Intelligence Agent
+# Реестр всех инструментов агента
+# Формат: name, type, mcp_server, description, cost_per_call
+
+tools:
+  - name: perplexity_search
+    type: search
+    mcp_server: perplexity
+    description: Поиск информации в интернете с актуальными данными
+    cost: low
+
+  - name: firecrawl_scrape
+    type: scrape
+    mcp_server: firecrawl
+    description: Парсинг содержимого веб-страниц в Markdown
+    cost: low
+
+  - name: apify_youtube
+    type: scrape
+    mcp_server: apify
+    description: Извлечение субтитров и метаданных из YouTube
+    cost: medium
+
+  - name: whisper_transcribe
+    type: transcribe
+    mcp_server: whisper
+    description: Транскрибация аудио/видео через OpenAI Whisper (fallback)
+    cost: high
+
+  - name: n8n_workflow
+    type: automation
+    mcp_server: n8n
+    description: Запуск автоматизированных рабочих процессов
+    cost: low

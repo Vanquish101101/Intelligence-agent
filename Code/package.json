@@ -1,0 +1,16 @@
+{
+  "name": "intelligence-agent",
+  "version": "0.1.0",
+  "description": "Vanquish Intelligence Agent — онлайн-разведчик для Marketing Agency",
+  "type": "module",
+  "main": "src/telegram-bot/index.js",
+  "scripts": {
+    "start": "node src/telegram-bot/index.js",
+    "dev": "node --watch src/telegram-bot/index.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "dotenv": "^16.4.5",
+    "openai": "^4.100.0"
+  }
+}

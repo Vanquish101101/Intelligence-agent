@@ -1,0 +1,25 @@
+# Environment — API ключи никогда не попадают в репо
+Code/.env
+.env
+
+# Dependencies
+node_modules/
+Code/node_modules/
+Code/src/mcp-servers/whisper/node_modules/
+
+# Logs
+Code/logs/
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Скриншоты из рабочей папки
+*.png
+*.jpg
+*.jpeg
+
+# Архив
+Архив/
