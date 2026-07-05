@@ -3,6 +3,8 @@ import { Telegraf } from 'telegraf';
 import { orchestrate } from '../orchestrator/index.js';
 import { transcribeAndAnalyze } from '../agents/transcriber/index.js';
 import { osintSearch, formatOsintReport } from '../agents/osint/index.js';
+import { getSettings, saveSettings, updateSetting } from '../db/userSettings.js';
+import { redisConnect } from '../db/redis.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -31,8 +33,45 @@ function formatReport(text) {
     .trim();
 }
 
+// Убирает все Markdown-символы для fallback-отправки
+function stripMd(text) {
+  return text.replace(/[*_`\[\]]/g, '');
+}
+
 function escMd(text) {
   return String(text).replace(/[_*`[]/g, '\\$&');
+}
+
+// Отправляет с Markdown, при 400-ошибке повторяет без форматирования
+async function safeSend(ctx, text, extra = {}) {
+  try {
+    return await ctx.reply(text, { parse_mode: 'Markdown', ...extra });
+  } catch (err) {
+    if (err.response?.error_code === 400 || err.message?.includes('parse entities')) {
+      logToFile(`Markdown parse error — retrying as plain text`);
+      return ctx.reply(stripMd(text), extra);
+    }
+    throw err;
+  }
+}
+
+// Редактирует сообщение с Markdown, при 400 — plain text
+async function safeEdit(ctx, msgId, text) {
+  try {
+    return await ctx.telegram.editMessageText(ctx.chat.id, msgId, null, text, { parse_mode: 'Markdown' });
+  } catch (err) {
+    if (err.response?.error_code === 400 || err.message?.includes('parse entities')) {
+      return ctx.telegram.editMessageText(ctx.chat.id, msgId, null, stripMd(text)).catch(() => {});
+    }
+    logToFile(`editMsg error: ${err.message}`);
+  }
+}
+
+// Повторяет sendChatAction('typing') каждые 4 сек пока не остановлен
+function keepTyping(ctx) {
+  ctx.sendChatAction('typing').catch(() => {});
+  const timer = setInterval(() => ctx.sendChatAction('typing').catch(() => {}), 4000);
+  return () => clearInterval(timer);
 }
 
 // ──────────────────────────────────────────────────────
@@ -74,20 +113,10 @@ const MAIN_KEYBOARD = {
 const ALLOWED_USER_ID = Number(process.env.TELEGRAM_ALLOWED_USER_ID);
 logToFile(`Bot starting | ALLOWED_USER_ID=${ALLOWED_USER_ID} | TOKEN_SET=${!!process.env.TELEGRAM_BOT_TOKEN}`);
 
+// Подключаем Redis (non-blocking, нужен для связи с Agent 2)
+redisConnect();
+
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-
-const userSettings = new Map();
-
-function getSettings(userId) {
-  if (!userSettings.has(userId)) {
-    userSettings.set(userId, {
-      topics:    ['маркетинг', 'крипта', 'партнёрки'],
-      platforms: ['youtube', 'web'],
-      depth:     'standard'
-    });
-  }
-  return userSettings.get(userId);
-}
 
 // ──────────────────────────────────────────────────────
 // Global error handler
@@ -178,8 +207,8 @@ bot.command('help', (ctx) => {
 // ──────────────────────────────────────────────────────
 // /status
 // ──────────────────────────────────────────────────────
-bot.command('status', (ctx) => {
-  const s   = getSettings(ctx.from.id);
+bot.command('status', async (ctx) => {
+  const s   = await getSettings(ctx.from.id);
   const cs  = sessionCosts.get(ctx.from.id);
   const spent = cs ? `$${cs.total.toFixed(4)}` : '$0.0000';
   ctx.reply(
@@ -205,8 +234,8 @@ bot.command('status', (ctx) => {
 // ──────────────────────────────────────────────────────
 // /settings
 // ──────────────────────────────────────────────────────
-bot.command('settings', (ctx) => {
-  const s = getSettings(ctx.from.id);
+bot.command('settings', async (ctx) => {
+  const s = await getSettings(ctx.from.id);
   ctx.reply(
     `⚙️ *Настройки мониторинга*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
@@ -227,26 +256,26 @@ bot.command('settings', (ctx) => {
   );
 });
 
-bot.command('set_topics', (ctx) => {
+bot.command('set_topics', async (ctx) => {
   const raw = ctx.message.text.replace('/set_topics', '').trim();
   if (!raw) return ctx.reply('📌 Укажи темы через запятую:\n`/set_topics маркетинг, крипта, арбитраж`', { parse_mode: 'Markdown' });
   const topics = raw.split(',').map(t => t.trim()).filter(Boolean);
-  getSettings(ctx.from.id).topics = topics;
+  await updateSetting(ctx.from.id, 'topics', topics);
   ctx.reply(
     `✅ *Темы обновлены:*\n\n` + topics.map(t => `  • ${t}`).join('\n') + `\n\n_Следующий /report будет по этим темам_`,
     { parse_mode: 'Markdown' }
   );
 });
 
-bot.command('set_platforms', (ctx) => {
+bot.command('set_platforms', async (ctx) => {
   const raw = ctx.message.text.replace('/set_platforms', '').trim();
   if (!raw) return ctx.reply('📱 Доступные платформы: `youtube`, `web`\n`/set_platforms youtube, web`', { parse_mode: 'Markdown' });
   const platforms = raw.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
-  getSettings(ctx.from.id).platforms = platforms;
+  await updateSetting(ctx.from.id, 'platforms', platforms);
   ctx.reply(`✅ *Платформы обновлены:*\n\n` + platforms.map(p => `  • ${p}`).join('\n'), { parse_mode: 'Markdown' });
 });
 
-bot.command('set_depth', (ctx) => {
+bot.command('set_depth', async (ctx) => {
   const raw = ctx.message.text.replace('/set_depth', '').trim().toLowerCase();
   if (!['quick', 'standard', 'deep'].includes(raw)) {
     return ctx.reply(
@@ -260,7 +289,7 @@ bot.command('set_depth', (ctx) => {
       { parse_mode: 'Markdown' }
     );
   }
-  getSettings(ctx.from.id).depth = raw;
+  await updateSetting(ctx.from.id, 'depth', raw);
   const labels = { quick: '⚡ быстро', standard: '📊 стандарт', deep: '🔬 глубокий поиск' };
   ctx.reply(`✅ *Глубина анализа:* ${labels[raw]}\n\n_Deepresearch режим ${raw === 'deep' ? 'включён' : 'выключен'}_`, { parse_mode: 'Markdown' });
 });
@@ -296,7 +325,7 @@ bot.command('costs', (ctx) => {
 // /report — полный отчёт
 // ──────────────────────────────────────────────────────
 bot.command('report', async (ctx) => {
-  const s = getSettings(ctx.from.id);
+  const s = await getSettings(ctx.from.id);
   logToFile(`/report started for user=${ctx.from.id} topics=${s.topics.join(',')} depth=${s.depth}`);
 
   const depthLabel = { quick: '⚡ быстро', standard: '📊 стандарт', deep: '🔬 DEEP' }[s.depth] || s.depth;
@@ -310,9 +339,8 @@ bot.command('report', async (ctx) => {
     { parse_mode: 'Markdown' }
   );
 
-  const edit = (text) =>
-    ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, text, { parse_mode: 'Markdown' })
-      .catch(e => logToFile(`editMsg error: ${e.message}`));
+  const edit = (text) => safeEdit(ctx, statusMsg.message_id, text);
+  const stopTyping = keepTyping(ctx);
 
   try {
     await edit('🔭 *Собираю данные...*\n\nОпрашиваю Perplexity, Firecrawl, YouTube...');
@@ -326,6 +354,7 @@ bot.command('report', async (ctx) => {
       depth:     s.depth
     });
 
+    stopTyping();
     logToFile(`/report done: ${result.meta.duration_sec}s cost=$${result.meta.cost_usd} tools=${result.meta.tools_used.join(',')}`);
     trackCost(ctx.from.id, '/report', result.meta.cost_usd, result.meta.tools_used);
 
@@ -340,16 +369,17 @@ bot.command('report', async (ctx) => {
     const fullText = report + meta;
 
     if (fullText.length <= 4096) {
-      await ctx.reply(fullText, { parse_mode: 'Markdown' });
+      await safeSend(ctx, fullText);
     } else {
       const chunks = chunkText(report, 3900);
       for (let i = 0; i < chunks.length; i++) {
-        await ctx.reply(chunks[i] + (i === chunks.length - 1 ? meta : ''), { parse_mode: 'Markdown' });
+        await safeSend(ctx, chunks[i] + (i === chunks.length - 1 ? meta : ''));
       }
     }
   } catch (err) {
+    stopTyping();
     logToFile(`/report ERROR: ${err.message}\n${err.stack}`);
-    await edit(`❌ *Ошибка при разведке*\n\n\`${err.message}\``).catch(() => {});
+    await edit(`❌ *Ошибка при разведке*\n\n\`${err.message}\``);
   }
 });
 
@@ -358,8 +388,9 @@ bot.command('report', async (ctx) => {
 // ──────────────────────────────────────────────────────
 bot.command('trends', async (ctx) => {
   const topic = ctx.message.text.replace('/trends', '').trim();
-  if (!topic) return ctx.reply('📈 Укажи тему:\n`/trends крипта`\n`/trends TikTok маркетинг`', { parse_mode: 'Markdown' });
+  if (!topic) return safeSend(ctx, '📈 Укажи тему:\n`/trends крипта`\n`/trends TikTok маркетинг`');
 
+  const stopTyping = keepTyping(ctx);
   const statusMsg = await ctx.reply(`📈 _Анализирую тренды:_ *${escMd(topic)}*...`, { parse_mode: 'Markdown' });
 
   try {
@@ -372,16 +403,16 @@ bot.command('trends', async (ctx) => {
       depth:     'quick'
     });
 
+    stopTyping();
     trackCost(ctx.from.id, '/trends', result.meta.cost_usd, result.meta.tools_used);
     await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-    const report = formatReport(result.report);
-    await ctx.reply(
-      report + `\n\n_⏱ ${result.meta.duration_sec}с · 💰 ~$${result.meta.cost_usd.toFixed(4)}_`,
-      { parse_mode: 'Markdown' }
+    await safeSend(ctx,
+      formatReport(result.report) + `\n\n_⏱ ${result.meta.duration_sec}с · 💰 ~$${result.meta.cost_usd.toFixed(4)}_`
     );
   } catch (err) {
+    stopTyping();
     logToFile(`/trends ERROR: ${err.message}`);
-    await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, `❌ Ошибка: ${err.message}`).catch(() => {});
+    await safeEdit(ctx, statusMsg.message_id, `❌ Ошибка: ${err.message}`);
   }
 });
 
@@ -390,21 +421,23 @@ bot.command('trends', async (ctx) => {
 // ──────────────────────────────────────────────────────
 bot.command('search', async (ctx) => {
   const query = ctx.message.text.replace('/search', '').trim();
-  if (!query) return ctx.reply('🔍 Укажи запрос:\n`/search партнёрки 2026`\n`/search YouTube монетизация`', { parse_mode: 'Markdown' });
+  if (!query) return safeSend(ctx, '🔍 Укажи запрос:\n`/search партнёрки 2026`\n`/search YouTube монетизация`');
 
+  const stopTyping = keepTyping(ctx);
   const statusMsg = await ctx.reply(`🔍 _Ищу:_ *${escMd(query)}*...`, { parse_mode: 'Markdown' });
 
   try {
     const { answer, cost } = await perplexitySearch(query, 700);
+    stopTyping();
     trackCost(ctx.from.id, '/search', cost);
     await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-    await ctx.reply(
-      `🔍 *${escMd(query)}*\n\n━━━━━━━━━━━━━━━━━━━━━\n\n${formatReport(answer)}\n\n_💰 ~$${cost.toFixed(4)}_`,
-      { parse_mode: 'Markdown' }
+    await safeSend(ctx,
+      `🔍 *${escMd(query)}*\n\n━━━━━━━━━━━━━━━━━━━━━\n\n${formatReport(answer)}\n\n_💰 ~$${cost.toFixed(4)}_`
     );
   } catch (err) {
+    stopTyping();
     logToFile(`/search ERROR: ${err.message}`);
-    await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, `❌ Ошибка: ${err.message}`).catch(() => {});
+    await safeEdit(ctx, statusMsg.message_id, `❌ Ошибка: ${err.message}`);
   }
 });
 
@@ -455,6 +488,7 @@ bot.command('osint', async (ctx) => {
   }
 
   logToFile(`/osint type=${type} target="${target}"`);
+  const stopTyping = keepTyping(ctx);
   const statusMsg = await ctx.reply(
     `🕵 _OSINT разведка..._\n\n*Тип:* ${type}\n*Цель:* \`${escMd(target)}\`\n\n_Занимает 20–60 секунд_`,
     { parse_mode: 'Markdown' }
@@ -462,20 +496,22 @@ bot.command('osint', async (ctx) => {
 
   try {
     const result = await osintSearch(target, type);
+    stopTyping();
     trackCost(ctx.from.id, `/osint ${type}`, result.cost_usd, result.tools_used);
     await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
 
     const report = formatOsintReport(result);
 
     if (report.length <= 4096) {
-      await ctx.reply(report, { parse_mode: 'Markdown' });
+      await safeSend(ctx, report);
     } else {
       const chunks = chunkText(report, 3900);
-      for (const chunk of chunks) await ctx.reply(chunk, { parse_mode: 'Markdown' });
+      for (const chunk of chunks) await safeSend(ctx, chunk);
     }
   } catch (err) {
+    stopTyping();
     logToFile(`/osint ERROR: ${err.message}`);
-    await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, `❌ OSINT ошибка: ${err.message}`).catch(() => {});
+    await safeEdit(ctx, statusMsg.message_id, `❌ OSINT ошибка: ${err.message}`);
   }
 });
 
@@ -486,6 +522,7 @@ bot.command('scrape', async (ctx) => {
   const url = ctx.message.text.replace('/scrape', '').trim();
   if (!url) return ctx.reply('🕷 Укажи URL:\n`/scrape https://vc.ru/marketing`', { parse_mode: 'Markdown' });
 
+  const stopTyping = keepTyping(ctx);
   const statusMsg = await ctx.reply(`🕷 _Парсю страницу..._`);
 
   try {
@@ -500,16 +537,17 @@ bot.command('scrape', async (ctx) => {
     const raw = data.data?.markdown || 'Нет данных';
     const content = raw.replace(/!\[[^\]]*\]\([^\)]*\)/g, '').replace(/\[([^\]]*)\]\([^\)]*\)/g, '$1').replace(/\n{3,}/g, '\n\n').trim().slice(0, 1800);
 
+    stopTyping();
     const cost = 0.001;
     trackCost(ctx.from.id, '/scrape', cost);
     await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-    await ctx.reply(
-      `📄 *Содержимое страницы*\n\n━━━━━━━━━━━━━━━━━━━━━\n\n${content}\n\n_💰 ~$${cost.toFixed(4)}_`,
-      { parse_mode: 'Markdown' }
+    await safeSend(ctx,
+      `📄 *Содержимое страницы*\n\n━━━━━━━━━━━━━━━━━━━━━\n\n${content}\n\n_💰 ~$${cost.toFixed(4)}_`
     );
   } catch (err) {
+    stopTyping();
     logToFile(`/scrape ERROR: ${err.message}`);
-    await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, `❌ Ошибка: ${err.message}`).catch(() => {});
+    await safeEdit(ctx, statusMsg.message_id, `❌ Ошибка: ${err.message}`);
   }
 });
 
@@ -523,27 +561,29 @@ bot.command('transcribe', async (ctx) => {
     { parse_mode: 'Markdown' }
   );
 
+  const stopTyping = keepTyping(ctx);
   const statusMsg = await ctx.reply('🎙 _Транскрибирую... это займёт 1–2 минуты_', { parse_mode: 'Markdown' });
 
   try {
     const result = await transcribeAndAnalyze(url);
-    const cost   = 0.010; // Whisper ~$0.006/min + LLM analysis
+    stopTyping();
+    const cost = 0.010;
     trackCost(ctx.from.id, '/transcribe', cost);
     await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
 
     const preview = result.transcript.slice(0, 600);
-    await ctx.reply(
+    await safeSend(ctx,
       `🎙 *Транскрипт*\n\n━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `${preview}${result.transcript.length > 600 ? '...' : ''}\n\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `🧠 *Анализ хуков и структуры:*\n\n` +
       `${formatReport(result.analysis)}\n\n` +
-      `_💰 ~$${cost.toFixed(4)}_`,
-      { parse_mode: 'Markdown' }
+      `_💰 ~$${cost.toFixed(4)}_`
     );
   } catch (err) {
+    stopTyping();
     logToFile(`/transcribe ERROR: ${err.message}`);
-    await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, `❌ Ошибка: ${err.message}`).catch(() => {});
+    await safeEdit(ctx, statusMsg.message_id, `❌ Ошибка: ${err.message}`);
   }
 });
 
@@ -555,19 +595,21 @@ bot.on('text', async (ctx) => {
   if (text.startsWith('/')) return;
 
   logToFile(`Plain text query: "${text.slice(0, 80)}"`);
+  const stopTyping = keepTyping(ctx);
   const statusMsg = await ctx.reply(`🔍 _Ищу ответ на твой вопрос..._`, { parse_mode: 'Markdown' });
 
   try {
     const { answer, cost } = await perplexitySearch(text, 700);
+    stopTyping();
     trackCost(ctx.from.id, 'текстовый', cost);
     await ctx.telegram.deleteMessage(ctx.chat.id, statusMsg.message_id).catch(() => {});
-    await ctx.reply(
-      `💬 *Ответ:*\n\n━━━━━━━━━━━━━━━━━━━━━\n\n${formatReport(answer)}\n\n_💰 ~$${cost.toFixed(4)}_`,
-      { parse_mode: 'Markdown' }
+    await safeSend(ctx,
+      `💬 *Ответ:*\n\n━━━━━━━━━━━━━━━━━━━━━\n\n${formatReport(answer)}\n\n_💰 ~$${cost.toFixed(4)}_`
     );
   } catch (err) {
+    stopTyping();
     logToFile(`text handler ERROR: ${err.message}`);
-    await ctx.telegram.editMessageText(ctx.chat.id, statusMsg.message_id, null, `❌ Ошибка: ${err.message}`).catch(() => {});
+    await safeEdit(ctx, statusMsg.message_id, `❌ Ошибка: ${err.message}`);
   }
 });
 

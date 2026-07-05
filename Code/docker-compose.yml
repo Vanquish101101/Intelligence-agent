@@ -1,0 +1,29 @@
+# Intelligence Agent — Vanquish Intelligence Agent
+# Онлайн-разведчик с OSINT, deepresearch-режимом и учётом затрат
+# ver. v0.2.0
+#
+# Запуск в составе цепочки (рекомендуется):
+#   cd "Marketing agency Project/Инфраструктура (Docker)"
+#   docker compose up -d
+#
+# Запуск только этого агента (dev/тест):
+#   cd Code && docker compose up -d
+
+name: intelligence-agent
+
+services:
+  intelligence-agent:
+    build: .
+    image: intelligence-agent:v0.2.0
+    container_name: intelligence-agent
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - marketing-agency-net
+
+networks:
+  marketing-agency-net:
+    name: marketing-agency-net
+    external: true

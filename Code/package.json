@@ -9,8 +9,10 @@
     "dev": "node --watch src/telegram-bot/index.js"
   },
   "dependencies": {
-    "telegraf": "^4.16.3",
+    "@supabase/supabase-js": "^2.110.0",
     "dotenv": "^16.4.5",
-    "openai": "^4.100.0"
+    "ioredis": "^5.11.1",
+    "openai": "^4.100.0",
+    "telegraf": "^4.16.3"
   }
 }
