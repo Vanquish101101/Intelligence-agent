@@ -3,13 +3,13 @@ import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { scout } from '../agents/scout/index.js';
+import { getSupabase } from '../db/supabase.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY;
 
-// Model selection by depth
 const MODELS = {
   quick:    { id: 'anthropic/claude-haiku-4-5', maxTokens: 900,  cost: 0.002 },
   standard: { id: 'anthropic/claude-haiku-4-5', maxTokens: 1800, cost: 0.004 },
@@ -18,7 +18,8 @@ const MODELS = {
 
 export async function orchestrate(task) {
   const startTime = Date.now();
-  const { task_id, topics = [], platforms, depth = 'standard', type = 'report' } = task;
+  const { task_id, user_id, topics = [], platforms, depth = 'standard', type = 'report' } = task;
+  const job_id = task_id || crypto.randomUUID();
 
   // 1. Read routing algorithm
   let algorithm = '';
@@ -28,13 +29,13 @@ export async function orchestrate(task) {
     algorithm = 'Анализируй данные и составь структурированный отчёт о трендах.';
   }
 
-  // 2. Scout phase — collect data from all sources
+  // 2. Scout phase — collect raw data from all sources
   const scoutResult = await scout(topics, platforms || ['youtube', 'web'], depth);
 
-  // 3. Generate report via LLM
+  // 3. Generate Telegram text report via LLM
   const { report, model_used } = await generateReport(task, scoutResult, algorithm);
 
-  // 4. Calculate total costs
+  // 4. Calculate costs
   const modelCfg = MODELS[depth] || MODELS.standard;
   const llmCost  = modelCfg.cost;
   const totalCost = Math.round((scoutResult.cost_usd + llmCost) * 1000) / 1000;
@@ -47,20 +48,77 @@ export async function orchestrate(task) {
   }
   costBreakdown['llm-analysis'] = llmCost;
 
+  const meta = {
+    tools_used:     [...scoutResult.tools_used, 'llm-analysis'],
+    errors:         scoutResult.errors,
+    duration_sec:   Math.round((Date.now() - startTime) / 1000),
+    cost_usd:       totalCost,
+    cost_breakdown: costBreakdown,
+    depth,
+    model_used
+  };
+
+  // 5. Build structured result (raw scout data — Agent 3 reads this)
+  const structured = buildStructuredResult(scoutResult);
+  const confidence = buildConfidence(scoutResult);
+  const status     = scoutResult.errors.length === 0 ? 'ok'
+    : scoutResult.tools_used.length > 0 ? 'partial' : 'error';
+
+  // 6. Save to Supabase search_results (fire-and-forget — non-fatal)
+  saveSearchResult({
+    job_id,
+    telegram_id:   user_id || null,
+    task_type:     type,
+    query_topics:  topics,
+    depth,
+    status,
+    result:        structured,
+    telegram_text: report,
+    confidence,
+    meta
+  }).catch(err => {
+    process.stderr.write(`[Orchestrator] search_results save failed: ${err.message}\n`);
+  });
+
   return {
-    task_id,
-    status: 'completed',
-    report,
-    meta: {
-      tools_used:     [...scoutResult.tools_used, 'llm-analysis'],
-      errors:         scoutResult.errors,
-      duration_sec:   Math.round((Date.now() - startTime) / 1000),
-      cost_usd:       totalCost,
-      cost_breakdown: costBreakdown,
-      depth,
-      model_used
+    job_id,
+    source_type: 'search',
+    result:      structured,
+    confidence,
+    status,
+    report,   // Telegram text — backwards compat with bot
+    meta
+  };
+}
+
+// Builds structured JSON from raw scout data for Agent 3
+function buildStructuredResult(scoutResult) {
+  return {
+    raw: {
+      perplexity: scoutResult.data.perplexity || null,
+      youtube:    scoutResult.data['apify-youtube'] || [],
+      firecrawl:  scoutResult.data.firecrawl || [],
     }
   };
+}
+
+// Confidence level based on tool availability
+function buildConfidence(scoutResult) {
+  const total  = scoutResult.tools_used.length + scoutResult.errors.length;
+  const failed = scoutResult.errors.length;
+  const level  = failed === 0 ? 'высокая'
+    : failed < total ? 'средняя' : 'низкая';
+  const explanation = failed === 0
+    ? 'Все источники доступны'
+    : `Недоступны: ${scoutResult.errors.map(e => e.split(':')[0]).join(', ')}`;
+  return { level, explanation };
+}
+
+// Save structured result to Supabase intelligence_agent.search_results
+async function saveSearchResult(payload) {
+  const db = getSupabase();
+  const { error } = await db.from('search_results').insert(payload);
+  if (error) throw new Error(error.message);
 }
 
 async function generateReport(task, scoutResult, algorithm) {
@@ -69,7 +127,7 @@ async function generateReport(task, scoutResult, algorithm) {
   const isDeep    = depth === 'deep';
   const isQuick   = type === 'trends' || depth === 'quick';
 
-  const dataBlock  = buildDataBlock(scoutResult, isDeep);
+  const dataBlock   = buildDataBlock(scoutResult, isDeep);
   const errorsBlock = scoutResult.errors.length
     ? `\nНЕДОСТУПНЫЕ ИСТОЧНИКИ: ${scoutResult.errors.join(' | ')}`
     : '';
