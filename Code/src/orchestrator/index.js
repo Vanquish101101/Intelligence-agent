@@ -19,7 +19,7 @@ const MODELS = {
 export async function orchestrate(task) {
   const startTime = Date.now();
   const { task_id, user_id, topics = [], platforms, depth = 'standard', type = 'report' } = task;
-  const job_id = task_id || crypto.randomUUID();
+  const job_id = crypto.randomUUID();
 
   // 1. Read routing algorithm
   let algorithm = '';
