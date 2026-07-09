@@ -103,10 +103,20 @@ const MAIN_KEYBOARD = {
       [{ text: '/report' }],
       [{ text: '/trends' }, { text: '/search' }],
       [{ text: '/osint' },  { text: '/costs' }],
-      [{ text: '/settings' }, { text: '/status' }],
+      [{ text: '/settings' }, { text: '/mode' }, { text: '/status' }],
     ],
     resize_keyboard: true,
     persistent: true,
+  }
+};
+
+// Inline-клавиатура выбора режима (показывается при /start и /mode)
+const MODE_KEYBOARD = {
+  reply_markup: {
+    inline_keyboard: [[
+      { text: '🔍 Получить информацию', callback_data: 'mode_info' },
+      { text: '🎬 Создать контент',     callback_data: 'mode_content' }
+    ]]
   }
 };
 
@@ -139,8 +149,8 @@ bot.use((ctx, next) => {
 // ──────────────────────────────────────────────────────
 // /start
 // ──────────────────────────────────────────────────────
-bot.start((ctx) => {
-  ctx.reply(
+bot.start(async (ctx) => {
+  await ctx.reply(
     `👁 *Intelligence Agent* запущен\n` +
     `_Твой личный онлайн-разведчик_\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
@@ -164,6 +174,10 @@ bot.start((ctx) => {
     `⚙️ /settings — настройки мониторинга\n\n` +
     `_Или просто напиши свой вопрос_ 👇`,
     { parse_mode: 'Markdown', ...MAIN_KEYBOARD }
+  );
+  await ctx.reply(
+    '━━━━━━━━━━━━━━━━━━━━━\n\n🎯 *Выбери режим работы:*',
+    { parse_mode: 'Markdown', ...MODE_KEYBOARD }
   );
 });
 
@@ -588,6 +602,51 @@ bot.command('transcribe', async (ctx) => {
 });
 
 // ──────────────────────────────────────────────────────
+// /mode — выбор режима работы агента
+// ──────────────────────────────────────────────────────
+bot.command('mode', async (ctx) => {
+  const s = await getSettings(ctx.from.id);
+  const current = s.mode || 'info';
+  const label   = current === 'content' ? '🎬 Создать контент' : '🔍 Получить информацию';
+  await ctx.reply(
+    `🎯 *Режим работы*\n\nТекущий: *${label}*\n\nВыбери режим:`,
+    { parse_mode: 'Markdown', ...MODE_KEYBOARD }
+  );
+});
+
+// Обработчики инлайн-кнопок выбора режима
+bot.action('mode_info', async (ctx) => {
+  await ctx.answerCbQuery('✅ Режим выбран');
+  await updateSetting(ctx.from.id, 'mode', 'info');
+  await safeSend(ctx,
+    '🔍 *Режим: Предоставление информации*\n\n' +
+    'Под капотом работают Агенты 1 + 2 + 3:\n' +
+    '• Агент 1 — поиск и сбор данных\n' +
+    '• Агент 2 — глубокий парсинг источников\n' +
+    '• Агент 3 — анализ и синтез отчёта\n\n' +
+    '━━━━━━━━━━━━━━━━━━━━━\n\n' +
+    '_Используй /report для полного отчёта или /search для быстрого поиска._',
+    MAIN_KEYBOARD
+  );
+});
+
+bot.action('mode_content', async (ctx) => {
+  await ctx.answerCbQuery('⏳ Скоро');
+  await safeSend(ctx,
+    '🎬 *Режим: Создание контента*\n\n' +
+    '⏳ *Агент 4 — Content Creator сейчас в разработке.*\n\n' +
+    'Когда будет готов, полная цепочка:\n' +
+    '• Агент 1 — поиск трендов\n' +
+    '• Агент 2 — парсинг источников\n' +
+    '• Агент 3 — анализ и формирование идей\n' +
+    '• Агент 4 — генерация постов, Reels, видео-скриптов\n\n' +
+    '━━━━━━━━━━━━━━━━━━━━━\n\n' +
+    '_Пока используй /report для поиска идей и анализа трендов._',
+    MAIN_KEYBOARD
+  );
+});
+
+// ──────────────────────────────────────────────────────
 // Plain text → Perplexity
 // ──────────────────────────────────────────────────────
 bot.on('text', async (ctx) => {
@@ -659,6 +718,7 @@ async function registerCommands() {
     { command: 'transcribe',  description: '🎙 Транскрибация — /transcribe url' },
     { command: 'settings',    description: '⚙️ Настройки мониторинга' },
     { command: 'set_depth',   description: '🔬 Глубина: quick / standard / deep' },
+    { command: 'mode',        description: '🎯 Режим: Информация / Создание контента' },
     { command: 'status',      description: '🤖 Статус агента' },
     { command: 'help',        description: '❓ Справка по командам' },
   ]).catch(e => logToFile(`setMyCommands error: ${e.message}`));
