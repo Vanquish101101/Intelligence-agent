@@ -4,7 +4,7 @@ import { orchestrate } from '../orchestrator/index.js';
 import { transcribeAndAnalyze } from '../agents/transcriber/index.js';
 import { osintSearch, formatOsintReport } from '../agents/osint/index.js';
 import { getSettings, saveSettings, updateSetting } from '../db/userSettings.js';
-import { redisConnect } from '../db/redis.js';
+import { redisConnect, getRedis } from '../db/redis.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -124,7 +124,27 @@ const ALLOWED_USER_ID = Number(process.env.TELEGRAM_ALLOWED_USER_ID);
 logToFile(`Bot starting | ALLOWED_USER_ID=${ALLOWED_USER_ID} | TOKEN_SET=${!!process.env.TELEGRAM_BOT_TOKEN}`);
 
 // Подключаем Redis (non-blocking, нужен для связи с Agent 2)
-redisConnect();
+redisConnect().then(() => subscribeToAgent2Notifications()).catch(() => {});
+
+// Слушаем канал notifications:agent1 — Агент 2 уведомляет о проблемах с передачей Агенту 3
+async function subscribeToAgent2Notifications() {
+  try {
+    const sub = getRedis().duplicate();
+    // Listeners must be added before connect() to avoid unhandled error events
+    sub.on('error', (err) => logToFile(`[Redis sub] ${err.message}`));
+    sub.on('message', (_channel, msg) => {
+      try {
+        const event = JSON.parse(msg);
+        logToFile(`[Agent2→Agent1] notification: type=${event.type || '?'} job=${event.job_id || '?'}`);
+      } catch {}
+    });
+    await sub.connect();
+    await sub.subscribe('notifications:agent1');
+    logToFile('[Redis] Subscribed to notifications:agent1');
+  } catch (err) {
+    logToFile(`[Redis] Agent2 subscribe failed (non-fatal): ${err.message}`);
+  }
+}
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 

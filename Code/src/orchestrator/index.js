@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { scout } from '../agents/scout/index.js';
 import { getSupabase } from '../db/supabase.js';
+import { buildAgent2Jobs, routeToAgent2 } from '../agents/router/agent2Queue.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -64,7 +65,13 @@ export async function orchestrate(task) {
   const status     = scoutResult.errors.length === 0 ? 'ok'
     : scoutResult.tools_used.length > 0 ? 'partial' : 'error';
 
-  // 6. Save to Supabase search_results (fire-and-forget — non-fatal)
+  // 6. Route complex content to Agent 2 (fire-and-forget — non-fatal, Agent 2 may be offline)
+  const agent2Jobs = buildAgent2Jobs(scoutResult, topics);
+  routeToAgent2(agent2Jobs).catch(err => {
+    process.stderr.write(`[Orchestrator] Agent2 routing failed: ${err.message}\n`);
+  });
+
+  // 7. Save to Supabase search_results (fire-and-forget — non-fatal)
   saveSearchResult({
     job_id,
     telegram_id:   user_id || null,
