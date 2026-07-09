@@ -5,6 +5,7 @@ import { transcribeAndAnalyze } from '../agents/transcriber/index.js';
 import { osintSearch, formatOsintReport } from '../agents/osint/index.js';
 import { getSettings, saveSettings, updateSetting } from '../db/userSettings.js';
 import { redisConnect, getRedis } from '../db/redis.js';
+import { notifyAgent4 } from '../handoff/agent4Handoff.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -888,13 +889,21 @@ bot.on('text', async (ctx) => {
   const wiz = wizardState.get(ctx.from.id);
   if (wiz && wiz.step === 5) {
     wizardState.delete(ctx.from.id);
-    await updateSetting(ctx.from.id, 'wizard', {
+    const wizardSettings = {
       network:      wiz.network,
       content_type: wiz.content_type,
       format:       wiz.format,
       style:        wiz.style,
       description:  text,
-    });
+    };
+    await updateSetting(ctx.from.id, 'wizard', wizardSettings);
+
+    // Push-хендофф Агенту 4 (2026-07-10, основной путь пробуждения для MVP —
+    // см. "Content creation agent/Доработки для Агентов 1 и 3 (передать).md",
+    // раздел D). Fire-and-forget: пользователь не должен ждать сеть/БД перед
+    // тем, как увидеть подтверждение сохранённых настроек.
+    notifyAgent4(ctx.from.id, wiz.mode, wizardSettings)
+      .catch((err) => logToFile(`[agent4Handoff] notifyAgent4 failed: ${err.message}`));
 
     const modeLabel = wiz.mode === 'publish' ? '🚀 Создать и опубликовать' : '🎬 Создать контент';
     const summary =
