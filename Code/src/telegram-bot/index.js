@@ -134,8 +134,20 @@ async function subscribeToAgent2Notifications() {
     sub.on('error', (err) => logToFile(`[Redis sub] ${err.message}`));
     sub.on('message', (_channel, msg) => {
       try {
-        const event = JSON.parse(msg);
-        logToFile(`[Agent2→Agent1] notification: type=${event.type || '?'} job=${event.job_id || '?'}`);
+        // Агент 2 публикует поле "event" (см. Deep parsing agent/Code/src/queue/index.js
+        // notifyAgent1), а не "type" — раньше здесь читалось несуществующее event.type,
+        // из-за чего в логах всегда было "type=?", а пользователь вообще не узнавал о
+        // деградации доставки Агенту 3 (уведомление только логировалось в файл).
+        const payload = JSON.parse(msg);
+        logToFile(`[Agent2→Agent1] notification: event=${payload.event || '?'} job=${payload.job_id || '?'}`);
+        if (Number.isFinite(ALLOWED_USER_ID)) {
+          const text = `⚠️ Агент 2 сообщает о проблеме с передачей данных Агенту 3.\n\n` +
+            `Job: ${payload.job_id || 'неизвестно'}\n` +
+            `Причина: ${payload.reason || 'не указана'}\n\n` +
+            `Данные не потеряны — Агент 2 сохранил их в очередь, Агент 3 заберёт при следующем плановом опросе.`;
+          bot.telegram.sendMessage(ALLOWED_USER_ID, text)
+            .catch((err) => logToFile(`[Agent2→Agent1] failed to forward notification to Telegram: ${err.message}`));
+        }
       } catch {}
     });
     await sub.connect();
@@ -652,6 +664,7 @@ bot.action('mode_info', async (ctx) => {
 
 bot.action('mode_content', async (ctx) => {
   await ctx.answerCbQuery('⏳ Скоро');
+  await updateSetting(ctx.from.id, 'mode', 'content');
   await safeSend(ctx,
     '🎬 *Режим: Создание контента*\n\n' +
     '⏳ *Агент 4 — Content Creator сейчас в разработке.*\n\n' +
