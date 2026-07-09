@@ -79,6 +79,11 @@ function keepTyping(ctx) {
 // ──────────────────────────────────────────────────────
 const sessionCosts = new Map(); // userId → { total, requests[] }
 
+// ──────────────────────────────────────────────────────
+// Wizard state — content creation settings (in-memory)
+// ──────────────────────────────────────────────────────
+const wizardState = new Map(); // userId → { mode, step, network, content_type, format, style }
+
 function trackCost(userId, cmd, cost_usd, tools = []) {
   if (!sessionCosts.has(userId)) {
     sessionCosts.set(userId, { total: 0, requests: [] });
@@ -113,11 +118,106 @@ const MAIN_KEYBOARD = {
 // Inline-клавиатура выбора режима (показывается при /start и /mode)
 const MODE_KEYBOARD = {
   reply_markup: {
-    inline_keyboard: [[
-      { text: '🔍 Получить информацию', callback_data: 'mode_info' },
-      { text: '🎬 Создать контент',     callback_data: 'mode_content' }
-    ]]
+    inline_keyboard: [
+      [
+        { text: '🔍 Получить информацию', callback_data: 'mode_info' },
+        { text: '🎬 Создать контент',     callback_data: 'mode_content' },
+      ],
+      [
+        { text: '🚀 Создать и опубликовать', callback_data: 'mode_publish' },
+      ]
+    ]
   }
+};
+
+// Wizard keyboards — 5-шаговый диалог настройки контента
+const WIZARD_NETWORK_KB = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: '📸 Instagram',  callback_data: 'wiz_net_instagram' },
+        { text: '▶️ YouTube',    callback_data: 'wiz_net_youtube' },
+        { text: '🎵 TikTok',     callback_data: 'wiz_net_tiktok' },
+      ],
+      [
+        { text: '✈️ Telegram',  callback_data: 'wiz_net_telegram' },
+        { text: '🔵 ВКонтакте', callback_data: 'wiz_net_vk' },
+        { text: '💚 WhatsApp',  callback_data: 'wiz_net_whatsapp' },
+      ],
+      [
+        { text: '👥 Одноклассники', callback_data: 'wiz_net_ok' },
+      ]
+    ]
+  }
+};
+
+const WIZARD_TYPE_KB = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: '📝 Пост',      callback_data: 'wiz_type_post' },
+        { text: '🎬 Видео',     callback_data: 'wiz_type_video' },
+        { text: '🖼 Фото',      callback_data: 'wiz_type_photo' },
+      ],
+      [
+        { text: '🎵 Аудио',    callback_data: 'wiz_type_audio' },
+        { text: '🎞 Reels',    callback_data: 'wiz_type_reels' },
+        { text: '🧵 Карусель', callback_data: 'wiz_type_carousel' },
+      ]
+    ]
+  }
+};
+
+const WIZARD_FORMAT_KB = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: '📱 9:16 вертикаль',   callback_data: 'wiz_fmt_916' },
+        { text: '🖥 16:9 горизонталь', callback_data: 'wiz_fmt_169' },
+      ],
+      [
+        { text: '⬜ 1:1 квадрат',     callback_data: 'wiz_fmt_11' },
+        { text: '📄 4:5 портрет',      callback_data: 'wiz_fmt_45' },
+        { text: '📝 Только текст',     callback_data: 'wiz_fmt_text' },
+      ]
+    ]
+  }
+};
+
+const WIZARD_STYLE_KB = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: '🎓 Экспертный',      callback_data: 'wiz_style_expert' },
+        { text: '😄 Развлекательный', callback_data: 'wiz_style_fun' },
+      ],
+      [
+        { text: '📚 Образовательный', callback_data: 'wiz_style_edu' },
+        { text: '💰 Продающий',       callback_data: 'wiz_style_sales' },
+      ],
+      [
+        { text: '🔥 Провокационный',  callback_data: 'wiz_style_provo' },
+        { text: '🤝 Нативный',        callback_data: 'wiz_style_native' },
+      ]
+    ]
+  }
+};
+
+// Метки для отображения выборов wizard'а
+const NETWORK_LABELS = {
+  instagram: '📸 Instagram', youtube: '▶️ YouTube', tiktok: '🎵 TikTok',
+  telegram: '✈️ Telegram',  vk: '🔵 ВКонтакте',   whatsapp: '💚 WhatsApp', ok: '👥 Одноклассники'
+};
+const TYPE_LABELS = {
+  post: '📝 Пост', video: '🎬 Видео',    photo: '🖼 Фото',
+  audio: '🎵 Аудио', reels: '🎞 Reels', carousel: '🧵 Карусель'
+};
+const FORMAT_LABELS = {
+  '916': '📱 9:16', '169': '🖥 16:9', '11': '⬜ 1:1', '45': '📄 4:5', 'text': '📝 Текст'
+};
+const STYLE_LABELS = {
+  expert: '🎓 Экспертный', fun: '😄 Развлекательный', edu: '📚 Образовательный',
+  sales: '💰 Продающий',   provo: '🔥 Провокационный', native: '🤝 Нативный'
 };
 
 const ALLOWED_USER_ID = Number(process.env.TELEGRAM_ALLOWED_USER_ID);
@@ -156,6 +256,17 @@ async function subscribeToAgent2Notifications() {
   } catch (err) {
     logToFile(`[Redis] Agent2 subscribe failed (non-fatal): ${err.message}`);
   }
+}
+
+// Запускает 5-шаговый wizard настройки контента
+async function startWizard(ctx, mode) {
+  wizardState.set(ctx.from.id, { mode, step: 1, network: null, content_type: null, format: null, style: null });
+  await safeSend(ctx,
+    `🪄 *Настройка контента — Шаг 1 из 5*\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `📱 *Для какой соцсети создаём контент?*`,
+    WIZARD_NETWORK_KB
+  );
 }
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
@@ -639,17 +750,25 @@ bot.command('transcribe', async (ctx) => {
 bot.command('mode', async (ctx) => {
   const s = await getSettings(ctx.from.id);
   const current = s.mode || 'info';
-  const label   = current === 'content' ? '🎬 Создать контент' : '🔍 Получить информацию';
+  const labels = {
+    info:    '🔍 Получить информацию',
+    content: '🎬 Создать контент',
+    publish: '🚀 Создать и опубликовать'
+  };
+  const label = labels[current] || labels.info;
   await ctx.reply(
     `🎯 *Режим работы*\n\nТекущий: *${label}*\n\nВыбери режим:`,
     { parse_mode: 'Markdown', ...MODE_KEYBOARD }
   );
 });
 
+// ──────────────────────────────────────────────────────
 // Обработчики инлайн-кнопок выбора режима
+// ──────────────────────────────────────────────────────
 bot.action('mode_info', async (ctx) => {
   await ctx.answerCbQuery('✅ Режим выбран');
   await updateSetting(ctx.from.id, 'mode', 'info');
+  wizardState.delete(ctx.from.id);
   await safeSend(ctx,
     '🔍 *Режим: Предоставление информации*\n\n' +
     'Под капотом работают Агенты 1 + 2 + 3:\n' +
@@ -663,28 +782,150 @@ bot.action('mode_info', async (ctx) => {
 });
 
 bot.action('mode_content', async (ctx) => {
-  await ctx.answerCbQuery('⏳ Скоро');
+  await ctx.answerCbQuery('🎬 Создать контент');
   await updateSetting(ctx.from.id, 'mode', 'content');
+  await startWizard(ctx, 'content');
+});
+
+bot.action('mode_publish', async (ctx) => {
+  await ctx.answerCbQuery('🚀 Создать и опубликовать');
+  await updateSetting(ctx.from.id, 'mode', 'publish');
+  await startWizard(ctx, 'publish');
+});
+
+// ──────────────────────────────────────────────────────
+// Wizard: шаги 1–4 (step 5 обрабатывается в bot.on('text'))
+// ──────────────────────────────────────────────────────
+
+// Шаг 1 → соцсеть
+bot.action(/^wiz_net_(.+)$/, async (ctx) => {
+  const network = ctx.match[1];
+  const wiz = wizardState.get(ctx.from.id);
+  if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
+  wiz.network = network;
+  wiz.step = 2;
+  await ctx.answerCbQuery(NETWORK_LABELS[network] || network);
   await safeSend(ctx,
-    '🎬 *Режим: Создание контента*\n\n' +
-    '⏳ *Агент 4 — Content Creator сейчас в разработке.*\n\n' +
-    'Когда будет готов, полная цепочка:\n' +
-    '• Агент 1 — поиск трендов\n' +
-    '• Агент 2 — парсинг источников\n' +
-    '• Агент 3 — анализ и формирование идей\n' +
-    '• Агент 4 — генерация постов, Reels, видео-скриптов\n\n' +
-    '━━━━━━━━━━━━━━━━━━━━━\n\n' +
-    '_Пока используй /report для поиска идей и анализа трендов._',
-    MAIN_KEYBOARD
+    `✅ Соцсеть: *${NETWORK_LABELS[network] || network}*\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `🎨 *Шаг 2 из 5 — Тип контента:*`,
+    WIZARD_TYPE_KB
+  );
+});
+
+// Шаг 2 → тип контента
+bot.action(/^wiz_type_(.+)$/, async (ctx) => {
+  const type = ctx.match[1];
+  const wiz = wizardState.get(ctx.from.id);
+  if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
+  wiz.content_type = type;
+  wiz.step = 3;
+  await ctx.answerCbQuery(TYPE_LABELS[type] || type);
+  await safeSend(ctx,
+    `✅ Тип: *${TYPE_LABELS[type] || type}*\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `📐 *Шаг 3 из 5 — Формат / соотношение сторон:*`,
+    WIZARD_FORMAT_KB
+  );
+});
+
+// Шаг 3 → формат
+bot.action(/^wiz_fmt_(.+)$/, async (ctx) => {
+  const fmt = ctx.match[1];
+  const wiz = wizardState.get(ctx.from.id);
+  if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
+  wiz.format = fmt;
+  wiz.step = 4;
+  await ctx.answerCbQuery(FORMAT_LABELS[fmt] || fmt);
+  await safeSend(ctx,
+    `✅ Формат: *${FORMAT_LABELS[fmt] || fmt}*\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `✍️ *Шаг 4 из 5 — Стиль подачи:*`,
+    WIZARD_STYLE_KB
+  );
+});
+
+// Шаг 4 → стиль
+bot.action(/^wiz_style_(.+)$/, async (ctx) => {
+  const style = ctx.match[1];
+  const wiz = wizardState.get(ctx.from.id);
+  if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
+  wiz.style = style;
+  wiz.step = 5;
+  await ctx.answerCbQuery(STYLE_LABELS[style] || style);
+  await safeSend(ctx,
+    `✅ Стиль: *${STYLE_LABELS[style] || style}*\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `💬 *Шаг 5 из 5 — Опиши задачу:*\n\n` +
+    `_Напиши свободное описание — о чём контент, ключевая идея, важные детали._`
   );
 });
 
 // ──────────────────────────────────────────────────────
-// Plain text → Perplexity
+// Переключатель модерации перед публикацией
+// ──────────────────────────────────────────────────────
+bot.action('toggle_moderation', async (ctx) => {
+  const s = await getSettings(ctx.from.id);
+  const newVal = !(s.moderation_mode || false);
+  await updateSetting(ctx.from.id, 'moderation_mode', newVal);
+  await ctx.answerCbQuery(newVal ? '✅ Модерация включена' : '⬜ Автопилот (без подтверждения)');
+  await ctx.editMessageReplyMarkup({
+    inline_keyboard: [[
+      { text: newVal ? '✅ Модерация перед публикацией: ВКЛ' : '⬜ Модерация перед публикацией: ВЫКЛ',
+        callback_data: 'toggle_moderation' }
+    ]]
+  }).catch(() => {});
+});
+
+// ──────────────────────────────────────────────────────
+// Plain text — wizard шаг 5 или Perplexity
 // ──────────────────────────────────────────────────────
 bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim();
   if (text.startsWith('/')) return;
+
+  // Wizard шаг 5 — свободное описание задачи
+  const wiz = wizardState.get(ctx.from.id);
+  if (wiz && wiz.step === 5) {
+    wizardState.delete(ctx.from.id);
+    await updateSetting(ctx.from.id, 'wizard', {
+      network:      wiz.network,
+      content_type: wiz.content_type,
+      format:       wiz.format,
+      style:        wiz.style,
+      description:  text,
+    });
+
+    const modeLabel = wiz.mode === 'publish' ? '🚀 Создать и опубликовать' : '🎬 Создать контент';
+    const summary =
+      `✅ *Настройки контента сохранены!*\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `🎯 *Режим:* ${modeLabel}\n` +
+      `📱 *Соцсеть:* ${NETWORK_LABELS[wiz.network] || wiz.network}\n` +
+      `🎨 *Тип:* ${TYPE_LABELS[wiz.content_type] || wiz.content_type}\n` +
+      `📐 *Формат:* ${FORMAT_LABELS[wiz.format] || wiz.format}\n` +
+      `✍️ *Стиль:* ${STYLE_LABELS[wiz.style] || wiz.style}\n` +
+      `💬 *Задача:* ${text.slice(0, 120)}${text.length > 120 ? '...' : ''}\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `⏳ *Агент 4 (Content Creator) в разработке.*\n` +
+      `Настройки сохранены и будут применены автоматически.`;
+
+    if (wiz.mode === 'publish') {
+      const s = await getSettings(ctx.from.id);
+      const modOn = s.moderation_mode || false;
+      await safeSend(ctx, summary, {
+        reply_markup: {
+          inline_keyboard: [[
+            { text: modOn ? '✅ Модерация перед публикацией: ВКЛ' : '⬜ Модерация перед публикацией: ВЫКЛ',
+              callback_data: 'toggle_moderation' }
+          ]]
+        }
+      });
+    } else {
+      await safeSend(ctx, summary, MAIN_KEYBOARD);
+    }
+    return;
+  }
 
   logToFile(`Plain text query: "${text.slice(0, 80)}"`);
   const stopTyping = keepTyping(ctx);
