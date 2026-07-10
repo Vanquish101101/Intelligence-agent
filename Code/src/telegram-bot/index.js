@@ -269,6 +269,17 @@ async function subscribeToAgent2Notifications() {
 // Supabase: content_creation_agent.agent1_delivery_queue (надёжный catch-up)
 // ──────────────────────────────────────────────────────
 
+function formatPublishReport(report) {
+  if (!report) return '';
+  const arr = Array.isArray(report) ? report : [report];
+  const lines = arr.map(r => {
+    const icon = r.status === 'success' ? '✅' : '❌';
+    const reasonStr = r.reason ? ` (${r.reason})` : '';
+    return `  • ${r.network || '?'} — ${icon} ${r.status === 'success' ? 'Опубликовано' : 'Ошибка'}${reasonStr}`;
+  });
+  return `📤 *Публикация:*\n${lines.join('\n')}\n\n`;
+}
+
 function formatAgent4Message(messageType, payload) {
   try {
     switch (messageType) {
@@ -286,7 +297,7 @@ function formatAgent4Message(messageType, payload) {
           `📦 Размер:${sizeStr || ' —'}${costStr}\n\n` +
           (text ? `📝 *Текст контента:*\n${text.slice(0, 800)}${text.length > 800 ? '...' : ''}\n\n` : '') +
           (downloadUrl ? `🔗 [Скачать файл](${downloadUrl})\n\n` : '') +
-          (publishReport ? `✅ *Публикация:* ${typeof publishReport === 'object' ? JSON.stringify(publishReport) : publishReport}\n\n` : '') +
+          (publishReport ? formatPublishReport(publishReport) : '') +
           `━━━━━━━━━━━━━━━━━━━━━\n\n` +
           `_Агент 4 сгенерировал контент по твоему wizard-запросу._`
         );
@@ -1153,8 +1164,8 @@ bot.on('text', async (ctx) => {
       `✍️ *Стиль:* ${STYLE_LABELS[wiz.style] || wiz.style}\n` +
       `💬 *Задача:* ${text.slice(0, 120)}${text.length > 120 ? '...' : ''}\n\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `⏳ *Агент 4 (Content Creator) в разработке.*\n` +
-      `Настройки сохранены и будут применены автоматически.`;
+      `⏳ *Агент 4 получил задачу и начинает генерацию контента.*\n` +
+      `Ожидай уведомления — обычно занимает меньше минуты.`;
 
     if (wiz.mode === 'publish') {
       const s = await getSettings(ctx.from.id);
