@@ -5,6 +5,7 @@ import { transcribeAndAnalyze } from '../agents/transcriber/index.js';
 import { osintSearch, formatOsintReport } from '../agents/osint/index.js';
 import { getSettings, saveSettings, updateSetting } from '../db/userSettings.js';
 import { redisConnect, getRedis } from '../db/redis.js';
+import { getSupabase } from '../db/supabase.js';
 import { notifyAgent4 } from '../handoff/agent4Handoff.js';
 import fs from 'fs';
 import path from 'path';
@@ -224,8 +225,11 @@ const STYLE_LABELS = {
 const ALLOWED_USER_ID = Number(process.env.TELEGRAM_ALLOWED_USER_ID);
 logToFile(`Bot starting | ALLOWED_USER_ID=${ALLOWED_USER_ID} | TOKEN_SET=${!!process.env.TELEGRAM_BOT_TOKEN}`);
 
-// Подключаем Redis (non-blocking, нужен для связи с Agent 2)
-redisConnect().then(() => subscribeToAgent2Notifications()).catch(() => {});
+// Подключаем Redis (non-blocking) и запускаем оба subscriber'а
+redisConnect().then(() => {
+  subscribeToAgent2Notifications();
+  subscribeToAgent4Notifications();
+}).catch(() => {});
 
 // Слушаем канал notifications:agent1 — Агент 2 уведомляет о проблемах с передачей Агенту 3
 async function subscribeToAgent2Notifications() {
@@ -256,6 +260,180 @@ async function subscribeToAgent2Notifications() {
     logToFile('[Redis] Subscribed to notifications:agent1');
   } catch (err) {
     logToFile(`[Redis] Agent2 subscribe failed (non-fatal): ${err.message}`);
+  }
+}
+
+// ──────────────────────────────────────────────────────
+// Agent 4 → Agent 1 обратный канал
+// Redis: notifications:agent1_from_agent4 (быстрый слой)
+// Supabase: content_creation_agent.agent1_delivery_queue (надёжный catch-up)
+// ──────────────────────────────────────────────────────
+
+function formatAgent4Message(messageType, payload) {
+  try {
+    switch (messageType) {
+      case 'content_ready': {
+        // camelCase-поля как отправляет Агент 4 (contentType, sizeBytes, downloadUrl)
+        const { network, contentType, description, text, sizeBytes, costUsd, downloadUrl, publishReport } = payload;
+        const sizeStr = sizeBytes ? ` (~${(sizeBytes / 1024).toFixed(0)} КБ)` : '';
+        const costStr = costUsd  ? ` · $${Number(costUsd).toFixed(4)}` : '';
+        return (
+          `🎬 *Контент готов!*\n\n` +
+          `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+          `📱 Соцсеть: *${network || '—'}*\n` +
+          `🎨 Тип: *${contentType || '—'}*\n` +
+          `✏️ Описание: ${description ? description.slice(0, 200) : '—'}\n` +
+          `📦 Размер:${sizeStr || ' —'}${costStr}\n\n` +
+          (text ? `📝 *Текст контента:*\n${text.slice(0, 800)}${text.length > 800 ? '...' : ''}\n\n` : '') +
+          (downloadUrl ? `🔗 [Скачать файл](${downloadUrl})\n\n` : '') +
+          (publishReport ? `✅ *Публикация:* ${typeof publishReport === 'object' ? JSON.stringify(publishReport) : publishReport}\n\n` : '') +
+          `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+          `_Агент 4 сгенерировал контент по твоему wizard-запросу._`
+        );
+      }
+      case 'quota_warning': {
+        // Поля как отправляет Агент 4: totalUsageBytes, userUsageBytes, limitBytes, items[]
+        const { totalUsageBytes, userUsageBytes, limitBytes, items = [] } = payload;
+        const usedGb  = userUsageBytes  ? `${(userUsageBytes  / 1e9).toFixed(2)} ГБ` : '—';
+        const limitGb = limitBytes      ? `${(limitBytes       / 1e9).toFixed(1)} ГБ` : '10 ГБ';
+        const oldest  = items[0];
+        return (
+          `⚠️ *Хранилище Агента 4 почти заполнено*\n\n` +
+          `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+          `📊 Твои файлы: *${usedGb}* из ${limitGb}\n` +
+          (totalUsageBytes ? `📦 Всего в bucket: ${(totalUsageBytes / 1e9).toFixed(2)} ГБ\n` : '') +
+          (oldest ? `📅 Самый старый файл: ${new Date(oldest.created_at).toLocaleDateString('ru-RU')} (${oldest.type || '?'})\n` : '') +
+          `\n_Агент 4 не может сохранить новый контент — хранилище R2 переполнено._\n\n` +
+          `Нажми кнопку ниже, чтобы удалить самый старый файл и освободить место.`
+        );
+      }
+      case 'moderation_request': {
+        // downloadUrl — рабочая presigned-ссылка (добавлена Агентом 4); r2Url — внутренний ключ
+        const { wizard, downloadUrl, r2Url } = payload;
+        const netStr  = wizard?.network      ? `📱 *${wizard.network}*` : '';
+        const typeStr = wizard?.content_type ? ` · ${wizard.content_type}` : '';
+        return (
+          `🛂 *Запрос на модерацию*\n\n` +
+          `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+          `${netStr}${typeStr}\n` +
+          (wizard?.description ? `✏️ ${wizard.description.slice(0, 200)}\n\n` : '\n') +
+          (downloadUrl ? `🔗 [Просмотреть файл](${downloadUrl})\n\n` : (r2Url ? `🔗 R2: \`${r2Url}\`\n\n` : '')) +
+          `_Контент сгенерирован. Подтверди или отклони публикацию:_`
+        );
+      }
+      default:
+        return (
+          `📬 *Уведомление от Агента 4*\n\n` +
+          `Тип: \`${messageType}\`\n\n` +
+          `\`\`\`\n${JSON.stringify(payload, null, 2).slice(0, 400)}\n\`\`\``
+        );
+    }
+  } catch {
+    return `📬 Уведомление от Агента 4 (тип: ${messageType})`;
+  }
+}
+
+function getAgent4Keyboard(messageType, payload) {
+  try {
+    if (messageType === 'quota_warning') {
+      const contentId = payload?.items?.[0]?.id;
+      if (!contentId) return null;
+      return { inline_keyboard: [[
+        { text: '✅ Удалить старое', callback_data: `cqa_qd_${contentId}` },
+        { text: '❌ Отмена',         callback_data: `cqr_qd_${contentId}` },
+      ]] };
+    }
+    if (messageType === 'moderation_request') {
+      const contentId = payload?.generatedContentId;
+      if (!contentId) return null;
+      return { inline_keyboard: [[
+        { text: '✅ Опубликовать', callback_data: `cqa_pm_${contentId}` },
+        { text: '❌ Отклонить',    callback_data: `cqr_pm_${contentId}` },
+      ]] };
+    }
+    return null;
+  } catch { return null; }
+}
+
+async function sendAgent4MessageToUser(messageType, payload) {
+  const text     = formatAgent4Message(messageType, payload);
+  const keyboard = getAgent4Keyboard(messageType, payload);
+  const extra    = { parse_mode: 'Markdown' };
+  if (keyboard) extra.reply_markup = keyboard;
+  try {
+    await bot.telegram.sendMessage(ALLOWED_USER_ID, text, extra);
+  } catch (err) {
+    logToFile(`[Agent4→Agent1] Markdown send failed, retrying plain: ${err.message}`);
+    const plainExtra = keyboard ? { reply_markup: keyboard } : {};
+    await bot.telegram.sendMessage(ALLOWED_USER_ID, stripMd(text), plainExtra)
+      .catch((e) => logToFile(`[Agent4→Agent1] plain send also failed: ${e.message}`));
+  }
+}
+
+async function subscribeToAgent4Notifications() {
+  try {
+    const sub = getRedis().duplicate();
+    sub.on('error', (err) => logToFile(`[Redis sub agent4] ${err.message}`));
+    sub.on('message', (_channel, msg) => {
+      try {
+        const envelope = JSON.parse(msg);
+        // Агент 4 шлёт обёртку {event, telegram_id, message_type, timestamp, payload, queue_id}
+        // payload — реальные данные; раньше сюда передавался весь envelope и поля не совпадали
+        logToFile(`[Agent4→Agent1] redis event=${envelope.event || '?'} type=${envelope.message_type} tid=${envelope.telegram_id}`);
+        if (Number.isFinite(ALLOWED_USER_ID)) {
+          sendAgent4MessageToUser(envelope.message_type, envelope.payload ?? {})
+            .catch((e) => logToFile(`[Agent4→Agent1] send failed: ${e.message}`));
+        }
+      } catch {}
+    });
+    await sub.connect();
+    await sub.subscribe('notifications:agent1_from_agent4');
+    logToFile('[Redis] Subscribed to notifications:agent1_from_agent4');
+  } catch (err) {
+    logToFile(`[Redis] Agent4 subscribe failed (non-fatal): ${err.message}`);
+  }
+}
+
+// catch-up: сюда попадают сообщения, пропущенные Redis-слоем (перезапуск бота и т.п.)
+// Читает только items старше 5 минут, чтобы не дублировать доставку Redis-пути
+const _deliveredAgent4Ids = new Set();
+
+async function pollAgent4DeliveryQueue() {
+  try {
+    const db = getSupabase();
+    const cutoff = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const { data, error } = await db
+      .schema('content_creation_agent')
+      .from('agent1_delivery_queue')
+      .select('id, telegram_id, message_type, payload')
+      .eq('status', 'pending')
+      .lt('created_at', cutoff)
+      .limit(10);
+
+    if (error) { logToFile(`[Agent4 poll] ${error.message}`); return; }
+    if (!data?.length) return;
+
+    for (const item of data) {
+      if (_deliveredAgent4Ids.has(item.id)) continue;
+      _deliveredAgent4Ids.add(item.id);
+      if (_deliveredAgent4Ids.size > 500) {
+        _deliveredAgent4Ids.delete(_deliveredAgent4Ids.values().next().value);
+      }
+
+      if (Number.isFinite(ALLOWED_USER_ID)) {
+        await sendAgent4MessageToUser(item.message_type, item.payload ?? {});
+      }
+
+      await db
+        .schema('content_creation_agent')
+        .from('agent1_delivery_queue')
+        .update({ status: 'delivered', last_attempt_at: new Date().toISOString() })
+        .eq('id', item.id);
+
+      logToFile(`[Agent4 poll] delivered ${item.id} type=${item.message_type}`);
+    }
+  } catch (err) {
+    logToFile(`[Agent4 poll] error: ${err.message}`);
   }
 }
 
@@ -879,6 +1057,65 @@ bot.action('toggle_moderation', async (ctx) => {
 });
 
 // ──────────────────────────────────────────────────────
+// Канал согласия пользователя → Агент 4 (пункт G)
+// cqa_qd_<uuid>  approve quota_deletion
+// cqr_qd_<uuid>  reject  quota_deletion
+// cqa_pm_<uuid>  approve publish_moderation
+// cqr_pm_<uuid>  reject  publish_moderation
+// ──────────────────────────────────────────────────────
+bot.action(/^(cqa|cqr)_(qd|pm)_([0-9a-f-]{36})$/, async (ctx) => {
+  const [, action, type, contentId] = ctx.match;
+  const decision     = action === 'cqa' ? 'approved' : 'rejected';
+  const decisionType = type   === 'qd'  ? 'quota_deletion' : 'publish_moderation';
+
+  await ctx.answerCbQuery(decision === 'approved' ? '✅ Принято' : '❌ Отклонено');
+  await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
+
+  const db = getSupabase();
+
+  let queueId = null;
+  try {
+    const { data, error } = await db
+      .from('agent4_consent_queue')
+      .insert({
+        telegram_id:          ALLOWED_USER_ID,
+        generated_content_id: contentId,
+        decision_type:        decisionType,
+        decision,
+        status:               'pending'
+      })
+      .select('id')
+      .single();
+    if (error) throw error;
+    queueId = data?.id ?? null;
+    logToFile(`[consent] INSERT ok id=${queueId} type=${decisionType} decision=${decision}`);
+  } catch (err) {
+    logToFile(`[consent] INSERT failed: ${err.message}`);
+  }
+
+  try {
+    await getRedis().publish('notifications:agent4_from_agent1', JSON.stringify({
+      event:                'decision_ready',
+      queue_id:             queueId,
+      telegram_id:          ALLOWED_USER_ID,
+      generated_content_id: contentId,
+      decision_type:        decisionType,
+      decision,
+      timestamp:            new Date().toISOString()
+    }));
+    logToFile(`[consent] Redis published decision=${decision} type=${decisionType} content=${contentId}`);
+  } catch (err) {
+    logToFile(`[consent] Redis publish failed (non-fatal): ${err.message}`);
+  }
+
+  const label = decision === 'approved'
+    ? (decisionType === 'quota_deletion' ? '🗑 Старый файл будет удалён.' : '🚀 Публикация запущена.')
+    : (decisionType === 'quota_deletion' ? '✖️ Удаление отменено.' : '✖️ Публикация отклонена.');
+  await bot.telegram.sendMessage(ALLOWED_USER_ID, label)
+    .catch((e) => logToFile(`[consent] label send failed: ${e.message}`));
+});
+
+// ──────────────────────────────────────────────────────
 // Plain text — wizard шаг 5 или Perplexity
 // ──────────────────────────────────────────────────────
 bot.on('text', async (ctx) => {
@@ -1014,6 +1251,11 @@ async function registerCommands() {
 logToFile('Calling bot.launch()...');
 
 await registerCommands();
+
+// Polling Agent 4 delivery queue каждые 5 минут (catch-up для пропущенных Redis-событий)
+setInterval(() => pollAgent4DeliveryQueue().catch(() => {}), 5 * 60 * 1000);
+// первый прогон сразу при старте — подбираем всё, что накопилось пока бот был выключен
+pollAgent4DeliveryQueue().catch(() => {});
 
 bot.launch()
   .then(() => logToFile('Bot stopped'))
