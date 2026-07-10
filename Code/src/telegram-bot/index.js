@@ -277,7 +277,9 @@ function formatPublishReport(report) {
     const reasonStr = r.reason ? ` (${r.reason})` : '';
     return `  • ${r.network || '?'} — ${icon} ${r.status === 'success' ? 'Опубликовано' : 'Ошибка'}${reasonStr}`;
   });
-  return `📤 *Публикация:*\n${lines.join('\n')}\n\n`;
+  const notConfigured = arr.some(r => r.reason === 'PostMyPost not configured');
+  const hint = notConfigured ? `\n_⚙️ Публикация не подключена — для активации обратитесь к администратору (нужны PostMyPost credentials)._` : '';
+  return `📤 *Публикация:*\n${lines.join('\n')}${hint}\n\n`;
 }
 
 function formatAgent4Message(messageType, payload) {
@@ -391,10 +393,13 @@ async function subscribeToAgent4Notifications() {
         // Агент 4 шлёт обёртку {event, telegram_id, message_type, timestamp, payload, queue_id}
         // payload — реальные данные; раньше сюда передавался весь envelope и поля не совпадали
         logToFile(`[Agent4→Agent1] redis event=${envelope.event || '?'} type=${envelope.message_type} tid=${envelope.telegram_id}`);
-        if (Number.isFinite(ALLOWED_USER_ID)) {
-          sendAgent4MessageToUser(envelope.message_type, envelope.payload ?? {})
-            .catch((e) => logToFile(`[Agent4→Agent1] send failed: ${e.message}`));
+        const eventTid = Number(envelope.telegram_id);
+        if (!Number.isFinite(ALLOWED_USER_ID) || eventTid !== ALLOWED_USER_ID) {
+          logToFile(`[Agent4→Agent1] skipping event for telegram_id=${eventTid} (expected ${ALLOWED_USER_ID})`);
+          return;
         }
+        sendAgent4MessageToUser(envelope.message_type, envelope.payload ?? {})
+          .catch((e) => logToFile(`[Agent4→Agent1] send failed: ${e.message}`));
       } catch {}
     });
     await sub.connect();
