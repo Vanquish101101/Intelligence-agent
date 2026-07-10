@@ -28,10 +28,21 @@ async function withRetry(fn, delays = RETRY_DELAYS_MS) {
   throw lastErr;
 }
 
-export function wizardHash({ network, content_type, format, style, description }) {
-  return createHash('sha256')
-    .update(`${network}|${content_type}|${format}|${style}|${description}`)
-    .digest('hex');
+// Найдено живой проверкой 2026-07-10 (полная цепочка Агент1→2→3→4): эта
+// функция и Content creation agent/Code/src/wizard/hash.js::computeWizardHash
+// — независимые реализации одного и того же контракта, но с разным
+// форматом (был `a|b|c`, там — `key=value\n...`) — то есть хеши НИКОГДА не
+// совпадали, ни при одном реальном запросе, независимо от содержимого
+// wizard'а. Не ломало функциональность (Агент 4 логирует "mismatch" и
+// использует актуальные настройки — рабочий fallback), но делало саму
+// сверку хешей бессмысленной и засоряло логи ложным предупреждением на
+// каждый запрос. Теперь — точное зеркало формата Агента 4, включая новое
+// поле use_trends (явный вопрос "на основе трендов", шаг 1 wizard'а).
+const WIZARD_HASH_FIELDS = ['network', 'content_type', 'format', 'style', 'description', 'use_trends'];
+
+export function wizardHash(wizard) {
+  const ordered = WIZARD_HASH_FIELDS.map((key) => `${key}=${wizard[key] ?? ''}`).join('\n');
+  return createHash('sha256').update(ordered).digest('hex');
 }
 
 export async function notifyAgent4(telegramId, mode, wizard) {

@@ -85,7 +85,7 @@ const sessionCosts = new Map(); // userId → { total, requests[] }
 // ──────────────────────────────────────────────────────
 // Wizard state — content creation settings (in-memory)
 // ──────────────────────────────────────────────────────
-const wizardState = new Map(); // userId → { mode, step, network, content_type, format, style }
+const wizardState = new Map(); // userId → { mode, step, use_trends, network, content_type, format, style }
 
 function trackCost(userId, cmd, cost_usd, tools = []) {
   if (!sessionCosts.has(userId)) {
@@ -133,7 +133,21 @@ const MODE_KEYBOARD = {
   }
 };
 
-// Wizard keyboards — 5-шаговый диалог настройки контента
+// Wizard keyboards — 6-шаговый диалог настройки контента (шаг 1 — опора на
+// тренды, добавлен 2026-07-10 по запросу пользователя: явный выбор вместо
+// угадывания по свободному тексту описания, см. Content creation agent/
+// Code/src/enrichment/enrichWithTrends.js).
+const WIZARD_TRENDS_KB = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: '🔥 На основе трендов', callback_data: 'wiz_trends_yes' },
+        { text: '📝 Просто по описанию', callback_data: 'wiz_trends_no' },
+      ]
+    ]
+  }
+};
+
 const WIZARD_NETWORK_KB = {
   reply_markup: {
     inline_keyboard: [
@@ -251,10 +265,20 @@ async function subscribeToAgent2Notifications() {
           logToFile(`[Agent2→Agent1] skipping event for telegram_id=${payload.telegram_id} (expected ${ALLOWED_USER_ID})`);
           return;
         }
+        // payload.buffered добавлен Агентом 2 2026-07-10 (см. Deep parsing agent
+        // /Code/src/router/index.js, ensureJobRow) — честный сигнал вместо
+        // всегда-заявленного "данные не потеряны": раньше резервная запись в
+        // agent3_handoff_queue сама могла молча провалиться (нарушение
+        // внешнего ключа), а пользователь всё равно видел успокаивающий
+        // текст. buffered===false — редкий, но реальный случай истинной
+        // потери; buffered===true/undefined — обычный ожидаемый путь.
+        const bufferNote = payload.buffered === false
+          ? '⚠️ Резервная запись тоже не удалась — данные, скорее всего, потеряны. Нужна ручная проверка.'
+          : 'Данные не потеряны — Агент 2 сохранил их в очередь, Агент 3 заберёт при следующем плановом опросе.';
         const text = `⚠️ Агент 2 сообщает о проблеме с передачей данных Агенту 3.\n\n` +
           `Job: ${payload.job_id || 'неизвестно'}\n` +
           `Причина: ${payload.reason || 'не указана'}\n\n` +
-          `Данные не потеряны — Агент 2 сохранил их в очередь, Агент 3 заберёт при следующем плановом опросе.`;
+          bufferNote;
         bot.telegram.sendMessage(ALLOWED_USER_ID, text)
           .catch((err) => logToFile(`[Agent2→Agent1] failed to forward notification to Telegram: ${err.message}`));
       } catch {}
@@ -457,14 +481,17 @@ async function pollAgent4DeliveryQueue() {
   }
 }
 
-// Запускает 5-шаговый wizard настройки контента
+// Запускает 6-шаговый wizard настройки контента
 async function startWizard(ctx, mode) {
-  wizardState.set(ctx.from.id, { mode, step: 1, network: null, content_type: null, format: null, style: null });
+  wizardState.set(ctx.from.id, { mode, step: 1, use_trends: null, network: null, content_type: null, format: null, style: null });
   await safeSend(ctx,
-    `🪄 *Настройка контента — Шаг 1 из 5*\n\n` +
+    `🪄 *Настройка контента — Шаг 1 из 6*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `📱 *Для какой соцсети создаём контент?*`,
-    WIZARD_NETWORK_KB
+    `🔥 *Опираться на актуальные тренды, или создать просто по описанию?*\n\n` +
+    `_"На основе трендов" — Агент 1 и Агент 2 сначала найдут и разберут свежую информацию по теме, ` +
+    `Агент 4 сгенерирует контент с её учётом (может занять пару минут). ` +
+    `"Просто по описанию" — контент сразу по твоим настройкам, без обращения к другим агентам._`,
+    WIZARD_TRENDS_KB
   );
 }
 
@@ -994,69 +1021,85 @@ bot.action('mode_publish', async (ctx) => {
 });
 
 // ──────────────────────────────────────────────────────
-// Wizard: шаги 1–4 (step 5 обрабатывается в bot.on('text'))
+// Wizard: шаги 1–5 (step 6 обрабатывается в bot.on('text'))
 // ──────────────────────────────────────────────────────
 
-// Шаг 1 → соцсеть
+// Шаг 1 → опора на тренды (да/нет)
+bot.action(/^wiz_trends_(yes|no)$/, async (ctx) => {
+  const useTrends = ctx.match[1] === 'yes';
+  const wiz = wizardState.get(ctx.from.id);
+  if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
+  wiz.use_trends = useTrends;
+  wiz.step = 2;
+  await ctx.answerCbQuery(useTrends ? '🔥 На основе трендов' : '📝 Просто по описанию');
+  await safeSend(ctx,
+    `✅ ${useTrends ? '🔥 Опираемся на актуальные тренды' : '📝 Создаём просто по описанию'}\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `📱 *Шаг 2 из 6 — Для какой соцсети создаём контент?*`,
+    WIZARD_NETWORK_KB
+  );
+});
+
+// Шаг 2 → соцсеть
 bot.action(/^wiz_net_(.+)$/, async (ctx) => {
   const network = ctx.match[1];
   const wiz = wizardState.get(ctx.from.id);
   if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
   wiz.network = network;
-  wiz.step = 2;
+  wiz.step = 3;
   await ctx.answerCbQuery(NETWORK_LABELS[network] || network);
   await safeSend(ctx,
     `✅ Соцсеть: *${NETWORK_LABELS[network] || network}*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `🎨 *Шаг 2 из 5 — Тип контента:*`,
+    `🎨 *Шаг 3 из 6 — Тип контента:*`,
     WIZARD_TYPE_KB
   );
 });
 
-// Шаг 2 → тип контента
+// Шаг 3 → тип контента
 bot.action(/^wiz_type_(.+)$/, async (ctx) => {
   const type = ctx.match[1];
   const wiz = wizardState.get(ctx.from.id);
   if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
   wiz.content_type = type;
-  wiz.step = 3;
+  wiz.step = 4;
   await ctx.answerCbQuery(TYPE_LABELS[type] || type);
   await safeSend(ctx,
     `✅ Тип: *${TYPE_LABELS[type] || type}*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `📐 *Шаг 3 из 5 — Формат / соотношение сторон:*`,
+    `📐 *Шаг 4 из 6 — Формат / соотношение сторон:*`,
     WIZARD_FORMAT_KB
   );
 });
 
-// Шаг 3 → формат
+// Шаг 4 → формат
 bot.action(/^wiz_fmt_(.+)$/, async (ctx) => {
   const fmt = ctx.match[1];
   const wiz = wizardState.get(ctx.from.id);
   if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
   wiz.format = fmt;
-  wiz.step = 4;
+  wiz.step = 5;
   await ctx.answerCbQuery(FORMAT_LABELS[fmt] || fmt);
   await safeSend(ctx,
     `✅ Формат: *${FORMAT_LABELS[fmt] || fmt}*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `✍️ *Шаг 4 из 5 — Стиль подачи:*`,
+    `✍️ *Шаг 5 из 6 — Стиль подачи:*`,
     WIZARD_STYLE_KB
   );
 });
 
-// Шаг 4 → стиль
+// Шаг 5 → стиль
 bot.action(/^wiz_style_(.+)$/, async (ctx) => {
   const style = ctx.match[1];
   const wiz = wizardState.get(ctx.from.id);
   if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
   wiz.style = style;
-  wiz.step = 5;
+  wiz.step = 6;
   await ctx.answerCbQuery(STYLE_LABELS[style] || style);
   await safeSend(ctx,
     `✅ Стиль: *${STYLE_LABELS[style] || style}*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `💬 *Шаг 5 из 5 — Опиши задачу:*\n\n` +
+    `💬 *Шаг 6 из 6 — Опиши задачу:*\n\n` +
     `_Напиши свободное описание — о чём контент, ключевая идея, важные детали._`
   );
 });
@@ -1137,15 +1180,15 @@ bot.action(/^(cqa|cqr)_(qd|pm)_([0-9a-f-]{36})$/, async (ctx) => {
 });
 
 // ──────────────────────────────────────────────────────
-// Plain text — wizard шаг 5 или Perplexity
+// Plain text — wizard шаг 6 или Perplexity
 // ──────────────────────────────────────────────────────
 bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim();
   if (text.startsWith('/')) return;
 
-  // Wizard шаг 5 — свободное описание задачи
+  // Wizard шаг 6 — свободное описание задачи
   const wiz = wizardState.get(ctx.from.id);
-  if (wiz && wiz.step === 5) {
+  if (wiz && wiz.step === 6) {
     wizardState.delete(ctx.from.id);
     const wizardSettings = {
       network:      wiz.network,
@@ -1153,6 +1196,7 @@ bot.on('text', async (ctx) => {
       format:       wiz.format,
       style:        wiz.style,
       description:  text,
+      use_trends:   wiz.use_trends,
     };
     await updateSetting(ctx.from.id, 'wizard', wizardSettings);
 
@@ -1163,19 +1207,45 @@ bot.on('text', async (ctx) => {
     notifyAgent4(ctx.from.id, wiz.mode, wizardSettings)
       .catch((err) => logToFile(`[agent4Handoff] notifyAgent4 failed: ${err.message}`));
 
+    // "На основе трендов" (2026-07-10, по прямому указанию пользователя):
+    // запрос должен реально что-то делать, а не молча деградировать — если
+    // выбор сделан, здесь и сейчас запускается настоящий поиск+анализ по
+    // теме задачи (тот же orchestrate(), что и у /trends), который
+    // естественным путём пишет в intelligence_agent.search_results и
+    // маршрутизирует тяжёлые находки Агенту 2 (routeToAgent2 внутри
+    // orchestrate). Агент 4 подхватит результат через свой MCP-запрос к
+    // Агенту 3 с ретраями (см. Content creation agent/Code/src/enrichment/
+    // enrichWithTrends.js) — это может занять пару минут, отдельно
+    // предупреждён пользователь текстом ниже. Fire-and-forget: не блокирует
+    // подтверждение wizard'а.
+    if (wiz.use_trends) {
+      orchestrate({
+        task_id:   `${ctx.from.id}_wizard_${Date.now()}`,
+        user_id:   ctx.from.id,
+        type:      'trends',
+        topics:    [text],
+        platforms: ['youtube', 'web'],
+        depth:     'quick'
+      }).catch((err) => logToFile(`[wizard] trend search failed (non-fatal, Агент 4 продолжит без обогащения): ${err.message}`));
+    }
+
     const modeLabel = wiz.mode === 'publish' ? '🚀 Создать и опубликовать' : '🎬 Создать контент';
+    const trendsLabel = wiz.use_trends ? '🔥 На основе трендов' : '📝 Просто по описанию';
+    const waitNote = wiz.use_trends
+      ? '⏳ *Агент 4 получил задачу.* Сначала Агент 1 и Агент 2 найдут и разберут свежую информацию по теме — это может занять пару минут, затем начнётся генерация.'
+      : '⏳ *Агент 4 получил задачу и начинает генерацию контента.*\nОжидай уведомления — обычно занимает меньше минуты.';
     const summary =
       `✅ *Настройки контента сохранены!*\n\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `🎯 *Режим:* ${modeLabel}\n` +
+      `🔥 *Подход:* ${trendsLabel}\n` +
       `📱 *Соцсеть:* ${NETWORK_LABELS[wiz.network] || wiz.network}\n` +
       `🎨 *Тип:* ${TYPE_LABELS[wiz.content_type] || wiz.content_type}\n` +
       `📐 *Формат:* ${FORMAT_LABELS[wiz.format] || wiz.format}\n` +
       `✍️ *Стиль:* ${STYLE_LABELS[wiz.style] || wiz.style}\n` +
       `💬 *Задача:* ${text.slice(0, 120)}${text.length > 120 ? '...' : ''}\n\n` +
       `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `⏳ *Агент 4 получил задачу и начинает генерацию контента.*\n` +
-      `Ожидай уведомления — обычно занимает меньше минуты.`;
+      waitNote;
 
     if (wiz.mode === 'publish') {
       const s = await getSettings(ctx.from.id);
