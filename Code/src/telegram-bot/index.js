@@ -57,7 +57,7 @@ async function safeSend(ctx, text, extra = {}) {
   }
 }
 
-// Редактирует сообщение с Markdown, при 400 — plain text
+// Редактирует сообщение с Markdown, при 400 — plain text, при других ошибках — отправляет новым сообщением
 async function safeEdit(ctx, msgId, text) {
   try {
     return await ctx.telegram.editMessageText(ctx.chat.id, msgId, null, text, { parse_mode: 'Markdown' });
@@ -65,7 +65,8 @@ async function safeEdit(ctx, msgId, text) {
     if (err.response?.error_code === 400 || err.message?.includes('parse entities')) {
       return ctx.telegram.editMessageText(ctx.chat.id, msgId, null, stripMd(text)).catch(() => {});
     }
-    logToFile(`editMsg error: ${err.message}`);
+    logToFile(`editMsg error (falling back to new message): ${err.message}`);
+    return safeSend(ctx, text);
   }
 }
 
@@ -245,14 +246,17 @@ async function subscribeToAgent2Notifications() {
         // деградации доставки Агенту 3 (уведомление только логировалось в файл).
         const payload = JSON.parse(msg);
         logToFile(`[Agent2→Agent1] notification: event=${payload.event || '?'} job=${payload.job_id || '?'}`);
-        if (Number.isFinite(ALLOWED_USER_ID)) {
-          const text = `⚠️ Агент 2 сообщает о проблеме с передачей данных Агенту 3.\n\n` +
-            `Job: ${payload.job_id || 'неизвестно'}\n` +
-            `Причина: ${payload.reason || 'не указана'}\n\n` +
-            `Данные не потеряны — Агент 2 сохранил их в очередь, Агент 3 заберёт при следующем плановом опросе.`;
-          bot.telegram.sendMessage(ALLOWED_USER_ID, text)
-            .catch((err) => logToFile(`[Agent2→Agent1] failed to forward notification to Telegram: ${err.message}`));
+        if (!Number.isFinite(ALLOWED_USER_ID)) return;
+        if (Number.isFinite(payload.telegram_id) && payload.telegram_id !== ALLOWED_USER_ID) {
+          logToFile(`[Agent2→Agent1] skipping event for telegram_id=${payload.telegram_id} (expected ${ALLOWED_USER_ID})`);
+          return;
         }
+        const text = `⚠️ Агент 2 сообщает о проблеме с передачей данных Агенту 3.\n\n` +
+          `Job: ${payload.job_id || 'неизвестно'}\n` +
+          `Причина: ${payload.reason || 'не указана'}\n\n` +
+          `Данные не потеряны — Агент 2 сохранил их в очередь, Агент 3 заберёт при следующем плановом опросе.`;
+        bot.telegram.sendMessage(ALLOWED_USER_ID, text)
+          .catch((err) => logToFile(`[Agent2→Agent1] failed to forward notification to Telegram: ${err.message}`));
       } catch {}
     });
     await sub.connect();
@@ -488,6 +492,7 @@ bot.use((ctx, next) => {
 // /start
 // ──────────────────────────────────────────────────────
 bot.start(async (ctx) => {
+  wizardState.delete(ctx.from.id); // сбрасываем незавершённый wizard при /start
   await ctx.reply(
     `👁 *Intelligence Agent* запущен\n` +
     `_Твой личный онлайн-разведчик_\n\n` +
@@ -566,7 +571,7 @@ bot.command('status', async (ctx) => {
   ctx.reply(
     `🤖 *Статус агента*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `🟢 *Онлайн* — версия 0.2.0 MVP\n\n` +
+    `🟢 *Онлайн* — версия 0.2.6\n\n` +
     `🔧 *Подключённые инструменты:*\n` +
     `  • 🔎 Perplexity — поиск и актуальные факты\n` +
     `  • 🕷 Firecrawl — парсинг сайтов\n` +
