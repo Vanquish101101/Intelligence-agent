@@ -38,10 +38,25 @@ async function withRetry(fn, delays = RETRY_DELAYS_MS) {
 // сверку хешей бессмысленной и засоряло логи ложным предупреждением на
 // каждый запрос. Теперь — точное зеркало формата Агента 4, включая новое
 // поле use_trends (явный вопрос "на основе трендов", шаг 1 wizard'а).
-const WIZARD_HASH_FIELDS = ['network', 'content_type', 'format', 'style', 'description', 'use_trends'];
+//
+// project + networks (2026-07-12, мультивыбор соцсетей + выбор PostMyPost-
+// проекта) заменили одиночный network — networks это МАССИВ, порядок выбора
+// пользователем (клики по кнопкам) не должен влиять на хеш, поэтому
+// сериализуется через сортировку, а не через toString(). Обе стороны
+// (здесь и Content creation agent/Code/src/wizard/hash.js::serializeField)
+// обязаны сериализовать массивы одинаково — иначе повторится та же история,
+// что и с прежним расхождением формата.
+const WIZARD_HASH_FIELDS = ['project', 'networks', 'content_type', 'format', 'style', 'description', 'use_trends'];
+
+function serializeField(value) {
+  if (Array.isArray(value)) {
+    return [...value].sort().join(',');
+  }
+  return value ?? '';
+}
 
 export function wizardHash(wizard) {
-  const ordered = WIZARD_HASH_FIELDS.map((key) => `${key}=${wizard[key] ?? ''}`).join('\n');
+  const ordered = WIZARD_HASH_FIELDS.map((key) => `${key}=${serializeField(wizard[key])}`).join('\n');
   return createHash('sha256').update(ordered).digest('hex');
 }
 

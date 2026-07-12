@@ -85,7 +85,7 @@ const sessionCosts = new Map(); // userId → { total, requests[] }
 // ──────────────────────────────────────────────────────
 // Wizard state — content creation settings (in-memory)
 // ──────────────────────────────────────────────────────
-const wizardState = new Map(); // userId → { mode, step, use_trends, network, content_type, format, style }
+const wizardState = new Map(); // userId → { mode, step, use_trends, project, networks, content_type, format, style }
 
 function trackCost(userId, cmd, cost_usd, tools = []) {
   if (!sessionCosts.has(userId)) {
@@ -148,21 +148,51 @@ const WIZARD_TRENDS_KB = {
   }
 };
 
-const WIZARD_NETWORK_KB = {
+// Мультивыбор сетей (2026-07-12, по прямому запросу пользователя — раньше
+// можно было выбрать только одну сеть на весь запрос) — клавиатура строится
+// динамически (buildNetworkKeyboard) и перерисовывается после каждого тычка,
+// показывая ✅ у уже выбранных сетей; отдельная кнопка "Готово" завершает
+// шаг, доступна только когда выбрана хотя бы одна сеть.
+const NETWORK_CODES = ['instagram', 'youtube', 'tiktok', 'telegram', 'vk', 'whatsapp', 'ok'];
+
+function buildNetworkKeyboard(selected) {
+  const mark = (code) => (selected.includes(code) ? '✅ ' : '') + NETWORK_LABELS[code];
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: mark('instagram'), callback_data: 'wiz_nettoggle_instagram' },
+          { text: mark('youtube'),   callback_data: 'wiz_nettoggle_youtube' },
+          { text: mark('tiktok'),    callback_data: 'wiz_nettoggle_tiktok' },
+        ],
+        [
+          { text: mark('telegram'), callback_data: 'wiz_nettoggle_telegram' },
+          { text: mark('vk'),       callback_data: 'wiz_nettoggle_vk' },
+          { text: mark('whatsapp'), callback_data: 'wiz_nettoggle_whatsapp' },
+        ],
+        [
+          { text: mark('ok'), callback_data: 'wiz_nettoggle_ok' },
+        ],
+        [
+          { text: selected.length ? `➡️ Готово (${selected.length})` : '➡️ Готово (выбери хотя бы одну)', callback_data: 'wiz_netdone' },
+        ]
+      ]
+    }
+  };
+}
+
+// Два PostMyPost-проекта на аккаунте (2026-07-12, по прямому указанию
+// пользователя): "Marketing" (351825, реклама/маркетинг) и "Project CORE"
+// (347765, личный информационный канал) — каждый со своими подключёнными
+// соцсетями на стороне PostMyPost. Код проекта ('marketing'/'core') уходит
+// в wizard.project, Агент 4 резолвит его в реальный numeric project_id
+// (см. Content creation agent/Code/src/index.js).
+const WIZARD_PROJECT_KB = {
   reply_markup: {
     inline_keyboard: [
       [
-        { text: '📸 Instagram',  callback_data: 'wiz_net_instagram' },
-        { text: '▶️ YouTube',    callback_data: 'wiz_net_youtube' },
-        { text: '🎵 TikTok',     callback_data: 'wiz_net_tiktok' },
-      ],
-      [
-        { text: '✈️ Telegram',  callback_data: 'wiz_net_telegram' },
-        { text: '🔵 ВКонтакте', callback_data: 'wiz_net_vk' },
-        { text: '💚 WhatsApp',  callback_data: 'wiz_net_whatsapp' },
-      ],
-      [
-        { text: '👥 Одноклассники', callback_data: 'wiz_net_ok' },
+        { text: '📢 Marketing',    callback_data: 'wiz_proj_marketing' },
+        { text: '🏠 Project CORE', callback_data: 'wiz_proj_core' },
       ]
     ]
   }
@@ -225,6 +255,7 @@ const NETWORK_LABELS = {
   instagram: '📸 Instagram', youtube: '▶️ YouTube', tiktok: '🎵 TikTok',
   telegram: '✈️ Telegram',  vk: '🔵 ВКонтакте',   whatsapp: '💚 WhatsApp', ok: '👥 Одноклассники'
 };
+const PROJECT_LABELS = { marketing: '📢 Marketing', core: '🏠 Project CORE' };
 const TYPE_LABELS = {
   post: '📝 Пост', video: '🎬 Видео',    photo: '🖼 Фото',
   audio: '🎵 Аудио', reels: '🎞 Reels', carousel: '🧵 Карусель'
@@ -314,14 +345,17 @@ function formatAgent4Message(messageType, payload) {
   try {
     switch (messageType) {
       case 'content_ready': {
-        // camelCase-поля как отправляет Агент 4 (contentType, sizeBytes, downloadUrl)
-        const { network, contentType, description, text, sizeBytes, costUsd, downloadUrl, publishReport } = payload;
+        // camelCase-поля как отправляет Агент 4 (contentType, sizeBytes, downloadUrl).
+        // networks/project (2026-07-12) заменили одиночный network — мультивыбор сетей.
+        const { project, networks, contentType, description, text, sizeBytes, costUsd, downloadUrl, publishReport } = payload;
         const sizeStr = sizeBytes ? ` (~${(sizeBytes / 1024).toFixed(0)} КБ)` : '';
         const costStr = costUsd  ? ` · $${Number(costUsd).toFixed(4)}` : '';
+        const networksStr = Array.isArray(networks) && networks.length ? networks.join(', ') : '—';
         return (
           `🎬 *Контент готов!*\n\n` +
           `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-          `📱 Соцсеть: *${network || '—'}*\n` +
+          `📂 Проект: *${project || '—'}*\n` +
+          `📱 Соцсети: *${networksStr}*\n` +
           `🎨 Тип: *${contentType || '—'}*\n` +
           `✏️ Описание: ${description ? description.slice(0, 200) : '—'}\n` +
           `📦 Размер:${sizeStr || ' —'}${costStr}\n\n` +
@@ -351,7 +385,7 @@ function formatAgent4Message(messageType, payload) {
       case 'moderation_request': {
         // downloadUrl — рабочая presigned-ссылка (добавлена Агентом 4); r2Url — внутренний ключ
         const { wizard, downloadUrl, r2Url } = payload;
-        const netStr  = wizard?.network      ? `📱 *${wizard.network}*` : '';
+        const netStr  = wizard?.networks?.length ? `📱 *${wizard.networks.join(', ')}*` : '';
         const typeStr = wizard?.content_type ? ` · ${wizard.content_type}` : '';
         return (
           `🛂 *Запрос на модерацию*\n\n` +
@@ -481,11 +515,11 @@ async function pollAgent4DeliveryQueue() {
   }
 }
 
-// Запускает 6-шаговый wizard настройки контента
+// Запускает 7-шаговый wizard настройки контента
 async function startWizard(ctx, mode) {
-  wizardState.set(ctx.from.id, { mode, step: 1, use_trends: null, network: null, content_type: null, format: null, style: null });
+  wizardState.set(ctx.from.id, { mode, step: 1, use_trends: null, project: null, networks: [], content_type: null, format: null, style: null });
   await safeSend(ctx,
-    `🪄 *Настройка контента — Шаг 1 из 6*\n\n` +
+    `🪄 *Настройка контента — Шаг 1 из 7*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
     `🔥 *Опираться на актуальные тренды, или создать просто по описанию?*\n\n` +
     `_"На основе трендов" — Агент 1 и Агент 2 сначала найдут и разберут свежую информацию по теме, ` +
@@ -1021,7 +1055,7 @@ bot.action('mode_publish', async (ctx) => {
 });
 
 // ──────────────────────────────────────────────────────
-// Wizard: шаги 1–5 (step 6 обрабатывается в bot.on('text'))
+// Wizard: шаги 1–6 (step 7 обрабатывается в bot.on('text'))
 // ──────────────────────────────────────────────────────
 
 // Шаг 1 → опора на тренды (да/нет)
@@ -1035,71 +1069,108 @@ bot.action(/^wiz_trends_(yes|no)$/, async (ctx) => {
   await safeSend(ctx,
     `✅ ${useTrends ? '🔥 Опираемся на актуальные тренды' : '📝 Создаём просто по описанию'}\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `📱 *Шаг 2 из 6 — Для какой соцсети создаём контент?*`,
-    WIZARD_NETWORK_KB
+    `📂 *Шаг 2 из 7 — С каким проектом PostMyPost работаем?*`,
+    WIZARD_PROJECT_KB
   );
 });
 
-// Шаг 2 → соцсеть
-bot.action(/^wiz_net_(.+)$/, async (ctx) => {
+// Шаг 2 → проект PostMyPost (2026-07-12 — на аккаунте два проекта, см.
+// WIZARD_PROJECT_KB выше)
+bot.action(/^wiz_proj_(.+)$/, async (ctx) => {
+  const project = ctx.match[1];
+  const wiz = wizardState.get(ctx.from.id);
+  if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
+  wiz.project = project;
+  wiz.step = 3;
+  await ctx.answerCbQuery(PROJECT_LABELS[project] || project);
+  await safeSend(ctx,
+    `✅ Проект: *${PROJECT_LABELS[project] || project}*\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `📱 *Шаг 3 из 7 — Для каких соцсетей создаём контент?*\n` +
+    `_Можно выбрать несколько — жми по каждой нужной, затем "Готово"._`,
+    buildNetworkKeyboard(wiz.networks)
+  );
+});
+
+// Шаг 3 → мультивыбор сетей (2026-07-12) — каждый тычок переключает сеть в
+// wiz.networks и перерисовывает ту же клавиатуру с обновлёнными галочками,
+// не создавая новое сообщение (editMessageReplyMarkup) — иначе чат
+// захламлялся бы клавиатурой на каждый клик.
+bot.action(/^wiz_nettoggle_(.+)$/, async (ctx) => {
   const network = ctx.match[1];
   const wiz = wizardState.get(ctx.from.id);
   if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
-  wiz.network = network;
-  wiz.step = 3;
+  const idx = wiz.networks.indexOf(network);
+  if (idx === -1) {
+    wiz.networks.push(network);
+  } else {
+    wiz.networks.splice(idx, 1);
+  }
   await ctx.answerCbQuery(NETWORK_LABELS[network] || network);
+  await ctx.editMessageReplyMarkup(buildNetworkKeyboard(wiz.networks).reply_markup).catch(() => {});
+});
+
+bot.action('wiz_netdone', async (ctx) => {
+  const wiz = wizardState.get(ctx.from.id);
+  if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
+  if (wiz.networks.length === 0) {
+    return ctx.answerCbQuery('⚠️ Выбери хотя бы одну соцсеть');
+  }
+  wiz.step = 4;
+  await ctx.answerCbQuery('✅ Сети выбраны');
+  const networksLabel = wiz.networks.map((n) => NETWORK_LABELS[n] || n).join(', ');
   await safeSend(ctx,
-    `✅ Соцсеть: *${NETWORK_LABELS[network] || network}*\n\n` +
+    `✅ Соцсети: *${networksLabel}*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `🎨 *Шаг 3 из 6 — Тип контента:*`,
+    `🎨 *Шаг 4 из 7 — Тип контента:*`,
     WIZARD_TYPE_KB
   );
 });
 
-// Шаг 3 → тип контента
+// Шаг 4 → тип контента
 bot.action(/^wiz_type_(.+)$/, async (ctx) => {
   const type = ctx.match[1];
   const wiz = wizardState.get(ctx.from.id);
   if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
   wiz.content_type = type;
-  wiz.step = 4;
+  wiz.step = 5;
   await ctx.answerCbQuery(TYPE_LABELS[type] || type);
   await safeSend(ctx,
     `✅ Тип: *${TYPE_LABELS[type] || type}*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `📐 *Шаг 4 из 6 — Формат / соотношение сторон:*`,
+    `📐 *Шаг 5 из 7 — Формат / соотношение сторон:*`,
     WIZARD_FORMAT_KB
   );
 });
 
-// Шаг 4 → формат
+// Шаг 5 → формат
 bot.action(/^wiz_fmt_(.+)$/, async (ctx) => {
   const fmt = ctx.match[1];
   const wiz = wizardState.get(ctx.from.id);
   if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
   wiz.format = fmt;
-  wiz.step = 5;
+  wiz.step = 6;
   await ctx.answerCbQuery(FORMAT_LABELS[fmt] || fmt);
   await safeSend(ctx,
     `✅ Формат: *${FORMAT_LABELS[fmt] || fmt}*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `✍️ *Шаг 5 из 6 — Стиль подачи:*`,
+    `✍️ *Шаг 6 из 7 — Стиль подачи:*`,
     WIZARD_STYLE_KB
   );
 });
 
-// Шаг 5 → стиль
+// Шаг 6 → стиль
 bot.action(/^wiz_style_(.+)$/, async (ctx) => {
   const style = ctx.match[1];
   const wiz = wizardState.get(ctx.from.id);
   if (!wiz) return ctx.answerCbQuery('⏰ Сессия истекла — выбери режим снова через /mode');
   wiz.style = style;
-  wiz.step = 6;
+  wiz.step = 7;
   await ctx.answerCbQuery(STYLE_LABELS[style] || style);
   await safeSend(ctx,
     `✅ Стиль: *${STYLE_LABELS[style] || style}*\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `💬 *Шаг 6 из 6 — Опиши задачу:*\n\n` +
+    `💬 *Шаг 7 из 7 — Опиши задачу:*\n\n` +
     `_Напиши свободное описание — о чём контент, ключевая идея, важные детали._`
   );
 });
@@ -1180,18 +1251,19 @@ bot.action(/^(cqa|cqr)_(qd|pm)_([0-9a-f-]{36})$/, async (ctx) => {
 });
 
 // ──────────────────────────────────────────────────────
-// Plain text — wizard шаг 6 или Perplexity
+// Plain text — wizard шаг 7 или Perplexity
 // ──────────────────────────────────────────────────────
 bot.on('text', async (ctx) => {
   const text = ctx.message.text.trim();
   if (text.startsWith('/')) return;
 
-  // Wizard шаг 6 — свободное описание задачи
+  // Wizard шаг 7 — свободное описание задачи
   const wiz = wizardState.get(ctx.from.id);
-  if (wiz && wiz.step === 6) {
+  if (wiz && wiz.step === 7) {
     wizardState.delete(ctx.from.id);
     const wizardSettings = {
-      network:      wiz.network,
+      project:      wiz.project,
+      networks:     wiz.networks,
       content_type: wiz.content_type,
       format:       wiz.format,
       style:        wiz.style,
@@ -1239,7 +1311,8 @@ bot.on('text', async (ctx) => {
       `━━━━━━━━━━━━━━━━━━━━━\n\n` +
       `🎯 *Режим:* ${modeLabel}\n` +
       `🔥 *Подход:* ${trendsLabel}\n` +
-      `📱 *Соцсеть:* ${NETWORK_LABELS[wiz.network] || wiz.network}\n` +
+      `📂 *Проект:* ${PROJECT_LABELS[wiz.project] || wiz.project}\n` +
+      `📱 *Соцсети:* ${wiz.networks.map((n) => NETWORK_LABELS[n] || n).join(', ')}\n` +
       `🎨 *Тип:* ${TYPE_LABELS[wiz.content_type] || wiz.content_type}\n` +
       `📐 *Формат:* ${FORMAT_LABELS[wiz.format] || wiz.format}\n` +
       `✍️ *Стиль:* ${STYLE_LABELS[wiz.style] || wiz.style}\n` +
