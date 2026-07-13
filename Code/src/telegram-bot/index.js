@@ -111,7 +111,8 @@ const MAIN_KEYBOARD = {
       [{ text: '/report' }],
       [{ text: '/trends' }, { text: '/search' }],
       [{ text: '/osint' },  { text: '/costs' }],
-      [{ text: '/settings' }, { text: '/mode' }, { text: '/status' }],
+      [{ text: '/settings' }, { text: '/topics' }],
+      [{ text: '/mode' }, { text: '/status' }],
     ],
     resize_keyboard: true,
     persistent: true,
@@ -132,6 +133,37 @@ const MODE_KEYBOARD = {
     ]
   }
 };
+
+// Меню выбора/переключения тем мониторинга (2026-07-13, по прямому запросу
+// пользователя — раньше темы менялись только текстовой командой
+// /set_topics, без визуального меню). Тот же паттерн toggle-кнопок с ✅/⬜,
+// что и мультивыбор соцсетей у Content creation agent's wizard —
+// перерисовка того же сообщения на каждый клик (editMessageReplyMarkup),
+// без накопления новых сообщений в чате. Каталог — фиксированный список
+// часто нужных тем; свободная тема, которой нет в списке, по-прежнему
+// добавляется через /set_topics (кнопки его не заменяют, а дополняют).
+const TOPIC_CATALOG = [
+  'маркетинг',
+  'инвестиции в РФ',
+  'тренды и контент соцсетей',
+  'крипта',
+  'партнёрки',
+  'арбитраж трафика',
+];
+
+function buildTopicsKeyboard(selected) {
+  const mark = (topic) => (selected.includes(topic) ? '✅ ' : '⬜ ') + topic;
+  const rows = [];
+  for (let i = 0; i < TOPIC_CATALOG.length; i += 2) {
+    const pair = TOPIC_CATALOG.slice(i, i + 2).map((topic) => ({
+      text: mark(topic),
+      callback_data: `topic_toggle_${TOPIC_CATALOG.indexOf(topic)}`
+    }));
+    rows.push(pair);
+  }
+  rows.push([{ text: '✅ Готово', callback_data: 'topic_done' }]);
+  return { reply_markup: { inline_keyboard: rows } };
+}
 
 // Wizard keyboards — 6-шаговый диалог настройки контента (шаг 1 — опора на
 // тренды, добавлен 2026-07-10 по запросу пользователя: явный выбор вместо
@@ -664,7 +696,7 @@ bot.command('settings', async (ctx) => {
     `🔍 *Глубина анализа:* ${s.depth}${s.depth === 'deep' ? ' 🔬' : ''}\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━\n\n` +
     `*Как изменить:*\n\n` +
-    `📌 Темы: \`/set_topics маркетинг, крипта, арбитраж\`\n` +
+    `📌 Темы: команда /topics (меню) или \`/set_topics маркетинг, крипта, арбитраж\`\n` +
     `📱 Платформы: \`/set_platforms youtube, web\`\n` +
     `🔍 Глубина:\n` +
     `  \`/set_depth quick\` — быстро (15–30 сек)\n` +
@@ -683,6 +715,41 @@ bot.command('set_topics', async (ctx) => {
     `✅ *Темы обновлены:*\n\n` + topics.map(t => `  • ${t}`).join('\n') + `\n\n_Следующий /report будет по этим темам_`,
     { parse_mode: 'Markdown' }
   );
+});
+
+// /topics — меню выбора/переключения тем (2026-07-13), альтернатива
+// текстовой команде /set_topics для тем из фиксированного каталога.
+bot.command('topics', async (ctx) => {
+  const s = await getSettings(ctx.from.id);
+  await ctx.reply(
+    `📌 *Темы мониторинга*\n\n` +
+    `Нажимай, чтобы включить/выключить тему, затем «Готово». ` +
+    `Своей темы нет в списке? Добавь через \`/set_topics тема1, тема2\`.`,
+    { parse_mode: 'Markdown', ...buildTopicsKeyboard(s.topics) }
+  );
+});
+
+bot.action(/^topic_toggle_(\d+)$/, async (ctx) => {
+  const idx = Number(ctx.match[1]);
+  const topic = TOPIC_CATALOG[idx];
+  if (!topic) return ctx.answerCbQuery('⚠️ Неизвестная тема');
+
+  const s = await getSettings(ctx.from.id);
+  const current = s.topics ?? [];
+  const updated = current.includes(topic)
+    ? current.filter((t) => t !== topic)
+    : [...current, topic];
+  await updateSetting(ctx.from.id, 'topics', updated);
+
+  await ctx.answerCbQuery(current.includes(topic) ? `⬜ ${topic}` : `✅ ${topic}`);
+  await ctx.editMessageReplyMarkup(buildTopicsKeyboard(updated).reply_markup).catch(() => {});
+});
+
+bot.action('topic_done', async (ctx) => {
+  const s = await getSettings(ctx.from.id);
+  await ctx.answerCbQuery('✅ Сохранено');
+  const label = (s.topics ?? []).length ? s.topics.join(' · ') : '(пусто — добавь через /set_topics)';
+  await ctx.editMessageText(`📌 *Темы мониторинга сохранены:*\n\n${label}`, { parse_mode: 'Markdown' }).catch(() => {});
 });
 
 bot.command('set_platforms', async (ctx) => {
@@ -1401,6 +1468,7 @@ async function registerCommands() {
     { command: 'scrape',      description: '🕷 Парсинг страницы — /scrape url' },
     { command: 'transcribe',  description: '🎙 Транскрибация — /transcribe url' },
     { command: 'settings',    description: '⚙️ Настройки мониторинга' },
+    { command: 'topics',      description: '📌 Меню выбора/переключения тем' },
     { command: 'set_depth',   description: '🔬 Глубина: quick / standard / deep' },
     { command: 'mode',        description: '🎯 Режим: Информация / Создание контента' },
     { command: 'status',      description: '🤖 Статус агента' },

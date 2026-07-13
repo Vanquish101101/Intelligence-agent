@@ -1,7 +1,9 @@
 import { getSupabase } from './supabase.js';
 
+// Темы по умолчанию — обновлено 2026-07-13 по прямому запросу пользователя.
+// См. TOPIC_CATALOG в telegram-bot/index.js для меню выбора/переключения тем.
 const DEFAULT_SETTINGS = {
-  topics:    ['маркетинг', 'крипта', 'партнёрки'],
+  topics:    ['маркетинг', 'инвестиции в РФ', 'тренды и контент соцсетей'],
   platforms: ['youtube', 'web'],
   depth:     'standard',
 };
