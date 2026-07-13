@@ -14,7 +14,7 @@ name: intelligence-agent
 services:
   intelligence-agent:
     build: .
-    image: intelligence-agent:v0.3.2
+    image: intelligence-agent:v0.3.3
     container_name: intelligence-agent
     restart: unless-stopped
     env_file: .env
