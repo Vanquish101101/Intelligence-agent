@@ -871,10 +871,24 @@ bot.command('report', async (ctx) => {
 // ──────────────────────────────────────────────────────
 // /trends
 // ──────────────────────────────────────────────────────
-bot.command('trends', async (ctx) => {
-  const topic = ctx.message.text.replace('/trends', '').trim();
-  if (!topic) return safeSend(ctx, '📈 Укажи тему:\n`/trends крипта`\n`/trends TikTok маркетинг`');
 
+// Меню выбора темы для /trends (2026-07-13, по прямому запросу пользователя —
+// раньше /trends без аргумента только просил ввести тему текстом, выбора не
+// было). Тот же TOPIC_CATALOG, что и у /topics — по клику сразу запускает
+// анализ по выбранной теме, а не переключает настройку (в отличие от
+// topic_toggle_*, это разовое действие, а не изменение user_settings).
+function buildTrendsTopicKeyboard() {
+  const rows = [];
+  for (let i = 0; i < TOPIC_CATALOG.length; i += 2) {
+    rows.push(TOPIC_CATALOG.slice(i, i + 2).map((topic) => ({
+      text: `📈 ${topic}`,
+      callback_data: `trends_topic_${TOPIC_CATALOG.indexOf(topic)}`
+    })));
+  }
+  return { reply_markup: { inline_keyboard: rows } };
+}
+
+async function runTrendsAnalysis(ctx, topic) {
   const stopTyping = keepTyping(ctx);
   const statusMsg = await ctx.reply(`📈 _Анализирую тренды:_ *${escMd(topic)}*...`, { parse_mode: 'Markdown' });
 
@@ -899,6 +913,26 @@ bot.command('trends', async (ctx) => {
     logToFile(`/trends ERROR: ${err.message}`);
     await safeEdit(ctx, statusMsg.message_id, `❌ Ошибка: ${err.message}`);
   }
+}
+
+bot.command('trends', async (ctx) => {
+  const topic = ctx.message.text.replace('/trends', '').trim();
+  if (!topic) {
+    return safeSend(ctx,
+      '📈 *По какой теме искать тренды?*\n\n_Выбери из списка ниже, или введи свою:_ `/trends TikTok маркетинг`',
+      { parse_mode: 'Markdown', ...buildTrendsTopicKeyboard() }
+    );
+  }
+  await runTrendsAnalysis(ctx, topic);
+});
+
+bot.action(/^trends_topic_(\d+)$/, async (ctx) => {
+  const idx = Number(ctx.match[1]);
+  const topic = TOPIC_CATALOG[idx];
+  if (!topic) return ctx.answerCbQuery('⚠️ Неизвестная тема');
+  await ctx.answerCbQuery(`📈 ${topic}`);
+  await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+  await runTrendsAnalysis(ctx, topic);
 });
 
 // ──────────────────────────────────────────────────────
